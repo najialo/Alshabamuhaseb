@@ -17,18 +17,15 @@ import openpyxl
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
 
-# إعداد تسجل الأخطاء
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
 
-# معرف الآدمن (حسابك الشخصي) لمنع أي شخص آخر من استخدام البوت
-ADMIN_ID = os.environ.get("ADMIN_ID")  # يتم ضبطه في المتغيرات البيئية
+ADMIN_ID = os.environ.get("ADMIN_ID")
+DEFAULT_COMMISSION_RATE = 2.5  # نسبة العمولة الافتراضية التلقائية 2.5%
 
-# حالات محادثة إضافة العقار
-TYPE, PRICE, COMMISSION_RATE, OWNER_NAME, OWNER_PHONE = range(5)
+TYPE, PRICE, OWNER_NAME, OWNER_PHONE = range(4)
 
-# --- إعداد قاعدة البيانات ---
 def init_db():
     conn = sqlite3.connect("real_estate.db")
     cursor = conn.cursor()
@@ -45,30 +42,20 @@ def init_db():
             created_at TEXT NOT NULL
         )
     """)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS reminders (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            text TEXT NOT NULL,
-            remind_at TEXT NOT NULL
-        )
-    """)
     conn.commit()
     conn.close()
 
-# --- دالة التحقق من الأمان ---
 def is_admin(user_id: int) -> bool:
     if not ADMIN_ID:
-        return True # في حال عدم ضبط الحساب يتيح الوصول للجميع للتجربة
+        return True
     return str(user_id) == str(ADMIN_ID)
 
-# --- توليد ملف Excel آلياً ---
 def generate_excel_report():
     conn = sqlite3.connect("real_estate.db")
     cursor = conn.cursor()
     cursor.execute("SELECT id, type, price, commission_rate, commission_amount, owner_name, owner_phone, status, created_at FROM properties")
     rows = cursor.fetchall()
     
-    # حساب الإحصائيات التلقائية
     cursor.execute("SELECT SUM(commission_amount) FROM properties WHERE status IN ('تم البيع', 'تم الإيجار')")
     earned = cursor.fetchone()[0] or 0.0
     cursor.execute("SELECT SUM(commission_amount) FROM properties WHERE status = 'متاح'")
@@ -76,20 +63,16 @@ def generate_excel_report():
     conn.close()
 
     wb = openpyxl.Workbook()
-    
-    # ورقة الصفقات الشاملة
     ws1 = wb.active
     ws1.title = "سجل الصفقات والعمولات"
-    headers = ["رقم العقار", "النوع", "السعر", "النسبة %", "قيمة العمولة", "اسم المالك", "رقم الهاتف", "الحالة", "تاريخ الإضافة"]
-    ws1.append(headers)
+    ws1.append(["رقم العقار", "النوع", "السعر", "النسبة %", "قيمة العمولة", "اسم المالك", "رقم الهاتف", "الحالة", "تاريخ الإضافة"])
     for row in rows:
         ws1.append(list(row))
 
-    # ورقة الملخص المالي الآلي
     ws2 = wb.create_sheet(title="الملخص المالي")
     ws2.append(["البيان", "المبلغ الكلي"])
-    ws2.append(["إجمالي العمولات المحصلة (تم البيع/الإيجار)", earned])
-    ws2.append(["إجمالي العمولات المتوقعة (العقارات المتاحة)", expected])
+    ws2.append(["إجمالي العمولات المحصلة", earned])
+    ws2.append(["إجمالي العمولات المتوقعة", expected])
     ws2.append(["مجموع العمولات الكلي", earned + expected])
 
     output = BytesIO()
@@ -97,28 +80,24 @@ def generate_excel_report():
     output.seek(0)
     return output
 
-# --- الأوامر الأساسية ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("🔒 هذا البوت خاص ومغلق بصلاحيات الآدمن فقط.")
         return
 
     welcome_text = (
-        "<b>🧠 أهلاً بك في مساعدك العقاري الذكي والخاص</b>\n\n"
-        "<b>قائمة الأوامر المتاحة:</b>\n"
-        "➕ /add - إضافة عقار وحساب عمولته وحفظه\n"
+        "<b>🧠 أهلاً بك في مساعدك العقاري السريع</b>\n\n"
+        "<b>الأوامر المتاحة:</b>\n"
+        "➕ /add - إضافة عقار (حساب العمولة 2.5% آلياً)\n"
         "📈 /stats - لوحة الأرباح والعمولات المالية\n"
-        "📋 /list - عرض كافة العقارات المسجلة\n"
+        "📋 /list - عرض كافة العقارات\n"
         "🔍 /search [كلمة] - بحث باسم المالك أو رقمه\n"
-        "🔄 /status [ID] - تغيير حالة العقار (متاح/مباع...)\n"
-        "📊 /auto_excel - استخراج التقرير المالي تلقائياً (Excel)\n"
-        "📄 /pdf [ID] - إنشاء بروشور وتسويق عقار (PDF للعميل)\n"
-        "⏰ /remind [التكست] - إضافة تذكير لمتابعة\n"
+        "📊 /auto_excel - استخراج تقرير Excel المالي\n"
+        "📄 /pdf [ID] - إنشاء بروشور تسويقي PDF\n"
         "❌ /cancel - إلغاء العملية الحالية"
     )
     await update.message.reply_text(welcome_text, parse_mode="HTML")
 
-# --- إضافة عقار جديد ---
 async def add_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id): return ConversationHandler.END
     keyboard = [[InlineKeyboardButton("🏠 للبيع", callback_data="للبيع"), InlineKeyboardButton("🔑 للإيجار", callback_data="للإيجار")]]
@@ -133,31 +112,28 @@ async def type_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return PRICE
 
 async def set_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip().replace(",", "")
     try:
-        context.user_data["price"] = float(update.message.text.strip())
-        await update.message.reply_text("أدخل **نسبة العمولة %** (مثال: 2.5):")
-        return COMMISSION_RATE
+        price = float(text)
+        comm_amount = (price * DEFAULT_COMMISSION_RATE) / 100
+        context.user_data["price"] = price
+        context.user_data["commission_rate"] = DEFAULT_COMMISSION_RATE
+        context.user_data["commission_amount"] = comm_amount
+
+        await update.message.reply_text(
+            f"💰 السعر: <b>{price:,.2f}</b>\n"
+            f"⚡ صافي العمولة التلقائية (2.5%): <b>{comm_amount:,.2f}</b>\n\n"
+            f"أدخل **اسم المالك**:",
+            parse_mode="HTML"
+        )
+        return OWNER_NAME
     except ValueError:
         await update.message.reply_text("❌ يرجى إدخال أرقام فقط للسعر:")
         return PRICE
 
-async def set_commission(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        rate = float(update.message.text.strip())
-        context.user_data["commission_rate"] = rate
-        price = context.user_data["price"]
-        comm_amount = (price * rate) / 100
-        context.user_data["commission_amount"] = comm_amount
-
-        await update.message.reply_text(f"✅ صافي العمولة: <b>{comm_amount:,.2f}</b>\n\nأدخل **اسم المالك** (سرّي):", parse_mode="HTML")
-        return OWNER_NAME
-    except ValueError:
-        await update.message.reply_text("❌ يرجى إدخال نسبة صحيحة:")
-        return COMMISSION_RATE
-
 async def set_owner_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["owner_name"] = update.message.text.strip()
-    await update.message.reply_text("أدخل **رقم هاتف المالك** (سرّي):")
+    await update.message.reply_text("أدخل **رقم هاتف المالك**:")
     return OWNER_PHONE
 
 async def set_owner_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -178,14 +154,13 @@ async def set_owner_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.commit()
     conn.close()
 
-    await update.message.reply_text(f"🎉 <b>تم حفظ العقار #{prop_id} بنجاح!</b>\nجاري توليد ملف Excel وتحديث التقرير المالي...", parse_mode="HTML")
+    await update.message.reply_text(f"🎉 <b>تم حفظ العقار #{prop_id} بنجاح!</b>\nجاري إرسال تقرير Excel...", parse_mode="HTML")
     
-    # إرسال أوتوماتيكي لملف Excel فور الحفظ!
     excel_file = generate_excel_report()
     await update.message.reply_document(
         document=excel_file,
         filename=f"تحديث_آلي_العمولات_{datetime.now().strftime('%Y%m%d')}.xlsx",
-        caption="📊 **تحديث آلي:** تم تحديث سجل Excel بالبيانات والعمولة الجديدة تلقائياً."
+        caption="📊 **تحديث آلي:** تم تحديث سجل Excel بالبيانات الجديدة تلقائياً."
     )
     context.user_data.clear()
     return ConversationHandler.END
@@ -195,32 +170,27 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("❌ تم إلغاء العملية.")
     return ConversationHandler.END
 
-# --- لوحة الإحصائيات والأرباح المالية ---
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id): return
     conn = sqlite3.connect("real_estate.db")
     cursor = conn.cursor()
-    
     cursor.execute("SELECT COUNT(*) FROM properties")
     total_count = cursor.fetchone()[0]
-    
     cursor.execute("SELECT SUM(commission_amount) FROM properties WHERE status IN ('تم البيع', 'تم الإيجار')")
     earned = cursor.fetchone()[0] or 0.0
-    
     cursor.execute("SELECT SUM(commission_amount) FROM properties WHERE status = 'متاح'")
     expected = cursor.fetchone()[0] or 0.0
     conn.close()
 
     msg = (
         "<b>📈 لوحة التحليل المالي والعمولات:</b>\n\n"
-        f"• إجمالي العقارات المسجلة: <b>{total_count}</b>\n"
-        f"• العمولات المحصلة الفعلية: <b>{earned:,.2f}</b>\n"
-        f"• العمولات المتوقعة (المتاحة): <b>{expected:,.2f}</b>\n"
-        f"💰 <b>مجموع الأرباح الكلي المتوقع: {earned + expected:,.2f}</b>"
+        f"• إجمالي العقارات: <b>{total_count}</b>\n"
+        f"• العمولات المحصلة: <b>{earned:,.2f}</b>\n"
+        f"• العمولات المتوقعة: <b>{expected:,.2f}</b>\n"
+        f"💰 <b>المجموع الكلي: {earned + expected:,.2f}</b>"
     )
     await update.message.reply_text(msg, parse_mode="HTML")
 
-# --- البحث الفوري ---
 async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id): return
     if not context.args:
@@ -235,7 +205,7 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn.close()
 
     if not rows:
-        await update.message.reply_text("🔍 لم يتم العثور على أي نتائج مطابقة.")
+        await update.message.reply_text("🔍 لم يتم العثور على نتائج.")
         return
 
     msg = "<b>🔍 نتائج البحث:</b>\n\n"
@@ -243,17 +213,15 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg += f"<b>#{r[0]}</b> | {r[1]} | السعر: {r[2]:,.0f} | العمولة: <b>{r[3]:,.0f}</b> | المالك: {r[4]} ({r[5]}) - [{r[6]}]\n"
     await update.message.reply_text(msg, parse_mode="HTML")
 
-# --- طلب ملف Excel المالي يدوياً ---
 async def auto_excel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id): return
     excel_file = generate_excel_report()
     await update.message.reply_document(
         document=excel_file,
         filename="التقرير_المالي_والعمولات.xlsx",
-        caption="📊 تفضل، التقرير المالي الشامل المحدث تلقائياً."
+        caption="📊 التقرير المالي الشامل المحدث تلقائياً."
     )
 
-# --- تصدير بروشور PDF للعملاء ---
 async def export_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id): return
     if not context.args:
@@ -263,7 +231,7 @@ async def export_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         prop_id = int(context.args[0])
     except ValueError:
-        await update.message.reply_text("❌ رقم العقار يجب أن يكون رقماً.")
+        await update.message.reply_text("❌ رقم العقار غير صحيح.")
         return
 
     conn = sqlite3.connect("real_estate.db")
@@ -287,8 +255,6 @@ async def export_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
     p.drawString(50, 590, f"Price: {row[2]:,.2f}")
     p.drawString(50, 560, f"Status: {row[3]}")
     p.line(50, 530, 550, 530)
-    p.setFont("Helvetica-Oblique", 10)
-    p.drawString(50, 500, "For inquiries, viewing, and bookings, please contact your trusted agent.")
     p.showPage()
     p.save()
     buffer.seek(0)
@@ -296,10 +262,9 @@ async def export_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_document(
         document=buffer,
         filename=f"Brochure_Property_{prop_id}.pdf",
-        caption=f"📄 بروشور العقار #{prop_id} جاهز بدون إظهار بيانات المالك أو عمولتك."
+        caption=f"📄 بروشور العقار #{prop_id} جاهز بدون بيانات المالك."
     )
 
-# --- عرض كافة العقارات ---
 async def list_properties(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id): return
     conn = sqlite3.connect("real_estate.db")
@@ -317,12 +282,10 @@ async def list_properties(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg += f"<b>#{r[0]}</b> | {r[1]} | السعر: {r[2]:,.0f} | العمولة: <b>{r[3]:,.0f}</b> | المالك: {r[4]} | [{r[5]}]\n"
     await update.message.reply_text(msg, parse_mode="HTML")
 
-# --- التشغيل ---
 def main():
     init_db()
     bot_token = os.environ.get("BOT_TOKEN")
     if not bot_token:
-        print("❌ لم يتم العثور على BOT_TOKEN!")
         return
 
     app = Application.builder().token(bot_token).build()
@@ -332,7 +295,6 @@ def main():
         states={
             TYPE: [CallbackQueryHandler(type_choice)],
             PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_price)],
-            COMMISSION_RATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_commission)],
             OWNER_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_owner_name)],
             OWNER_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_owner_phone)],
         },
@@ -347,7 +309,6 @@ def main():
     app.add_handler(CommandHandler("auto_excel", auto_excel))
     app.add_handler(CommandHandler("pdf", export_pdf))
 
-    print("🚀 المساعد العقاري الذكي يعمل الآن...")
     app.run_polling()
 
 if __name__ == "__main__":
