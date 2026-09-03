@@ -14,31 +14,20 @@ from telegram.ext import (
     filters,
 )
 import openpyxl
-
-# استيراد مكتبات ReportLab وتشكيل النص العربي
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
-from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.ttfonts import TTFont
-import arabic_reshaper
-from bidi.algorithm import get_display
 
-# إعداد التسجيل للخطأ والتحذيرات
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
 
-ADMIN_ID = os.environ.get("ADMIN_ID")
-DEFAULT_COMMISSION_RATE = 2.5  # نسبة العمولة الافتراضية التلقائية 2.5%
+ADMIN_ID = os.environ.get("ADMIN_ID", "ضع_معرف_حسابك_هنا") 
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "ضع_توكن_البوت_هنا")
 
-TYPE, PRICE, OWNER_NAME, OWNER_PHONE = range(4)
+DEFAULT_SALE_COMMISSION = 2.5  # عمولة البيع 2.5%
 
-# دالة لمُعالجة وترتيب النص العربي لـ ReportLab
-def ar_text(text: str) -> str:
-    if not text:
-        return ""
-    reshaped_text = arabic_reshaper.reshape(str(text))
-    return get_display(reshaped_text)
+# المراحل الخاصة بالمحادثة
+TYPE, RENT_DURATION, PRICE, OWNER_NAME, OWNER_PHONE = range(5)
 
 def init_db():
     conn = sqlite3.connect("real_estate.db")
@@ -60,7 +49,7 @@ def init_db():
     conn.close()
 
 def is_admin(user_id: int) -> bool:
-    if not ADMIN_ID:
+    if not ADMIN_ID or ADMIN_ID == "ضع_معرف_حسابك_هنا":
         return True
     return str(user_id) == str(ADMIN_ID)
 
@@ -102,7 +91,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_text = (
         "<b>🧠 أهلاً بك في مساعدك العقاري السريع</b>\n\n"
         "<b>الأوامر المتاحة:</b>\n"
-        "➕ /add - إضافة عقار (حساب العمولة 2.5% آلياً)\n"
+        "➕ /add - إضافة عقار (حساب العمولة آلياً حسب نوع وعقد العقار)\n"
         "📈 /stats - لوحة الأرباح والعمولات المالية\n"
         "📋 /list - عرض كافة العقارات\n"
         "🔍 /search [كلمة] - بحث باسم المالك أو رقمه\n"
@@ -114,32 +103,76 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def add_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id): return ConversationHandler.END
-    keyboard = [[InlineKeyboardButton("🏠 للبيع", callback_data="للبيع"), InlineKeyboardButton("🔑 للإيجار", callback_data="للإيجار")]]
+    keyboard = [
+        [InlineKeyboardButton("🏠 للبيع", callback_data="للبيع"), InlineKeyboardButton("🔑 للإيجار", callback_data="للإيجار")]
+    ]
     await update.message.reply_text("اختر نوع العرض:", reply_markup=InlineKeyboardMarkup(keyboard))
     return TYPE
 
 async def type_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    context.user_data["type"] = query.data
-    await query.edit_message_text(f"النوع: <b>{query.data}</b>\n\nأدخل <b>السعر الكلي</b> (أرقام فقط):", parse_mode="HTML")
+    choice = query.data
+    context.user_data["type"] = choice
+
+    if choice == "للإيجار":
+        keyboard = [
+            [InlineKeyboardButton("📅 سنوي (أجار شهر)", callback_data="rent_yearly")],
+            [InlineKeyboardButton("🗓️ شهري (+33%)", callback_data="rent_monthly")],
+            [InlineKeyboardButton("⏳ أسبوعين (+45%)", callback_data="rent_two_weeks")],
+            [InlineKeyboardButton("📆 أسبوعي (+85%)", callback_data="rent_weekly")],
+            [InlineKeyboardButton("☀️ يومي (+45%)", callback_data="rent_daily")]
+        ]
+        await query.edit_message_text("اختر **مدة الإيجار** لحساب العمولة تلقائياً:", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+        return RENT_DURATION
+    else:
+        context.user_data["commission_rate"] = DEFAULT_SALE_COMMISSION
+        await query.edit_message_text(f"النوع: <b>{choice}</b>\n\nأدخل **السعر الإجمالي للبيع** (أرقام فقط):", parse_mode="HTML")
+        return PRICE
+
+async def rent_duration_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    duration_key = query.data
+
+    rates_map = {
+        "rent_yearly": (8.33, "سنوي (أجار شهر كامل)"),
+        "rent_monthly": (33.0, "شهري (+33%)"),
+        "rent_two_weeks": (45.0, "أسبوعين (+45%)"),
+        "rent_weekly": (85.0, "أسبوعي (+85%)"),
+        "rent_daily": (45.0, "يومي (+45%)")
+    }
+
+    rate, label = rates_map.get(duration_key, (8.33, "إيجار"))
+    context.user_data["commission_rate"] = rate
+    context.user_data["rent_label"] = label
+    
+    await query.edit_message_text(
+        f"مدة الإيجار المحددة: <b>{label}</b>\n\nأدخل **مبلغ الإيجار/حق المالك** (أرقام فقط):", 
+        parse_mode="HTML"
+    )
     return PRICE
 
 async def set_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip().replace(",", "")
     try:
         price = float(text)
-        comm_amount = (price * DEFAULT_COMMISSION_RATE) / 100
+        comm_rate = context.user_data.get("commission_rate", DEFAULT_SALE_COMMISSION)
+        comm_amount = (price * comm_rate) / 100
+
         context.user_data["price"] = price
-        context.user_data["commission_rate"] = DEFAULT_COMMISSION_RATE
         context.user_data["commission_amount"] = comm_amount
 
-        await update.message.reply_text(
-            f"💰 السعر: <b>{price:,.2f}</b>\n"
-            f"⚡ صافي العمولة التلقائية (2.5%): <b>{comm_amount:,.2f}</b>\n\n"
-            f"أدخل <b>اسم المالك</b>:",
-            parse_mode="HTML"
-        )
+        prop_type = context.user_data.get("type")
+        rent_label = context.user_data.get("rent_label", "")
+
+        info_msg = f"💰 السعر/حق المالك: <b>{price:,.2f}</b>\n"
+        if prop_type == "للإيجار":
+            info_msg += f"📌 مدة العقد: <b>{rent_label}</b>\n"
+        
+        info_msg += f"⚡ صافي العمولة/الزيادة ({comm_rate}%): <b>{comm_amount:,.2f}</b>\n\nأدخل **اسم المالك**:"
+
+        await update.message.reply_text(info_msg, parse_mode="HTML")
         return OWNER_NAME
     except ValueError:
         await update.message.reply_text("❌ يرجى إدخال أرقام فقط للسعر:")
@@ -147,20 +180,24 @@ async def set_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def set_owner_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["owner_name"] = update.message.text.strip()
-    await update.message.reply_text("أدخل <b>رقم هاتف المالك</b>:", parse_mode="HTML")
+    await update.message.reply_text("أدخل **رقم هاتف المالك**:")
     return OWNER_PHONE
 
 async def set_owner_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["owner_phone"] = update.message.text.strip()
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
     
+    full_type = context.user_data["type"]
+    if context.user_data.get("rent_label"):
+        full_type += f" ({context.user_data['rent_label']})"
+
     conn = sqlite3.connect("real_estate.db")
     cursor = conn.cursor()
     cursor.execute("""
         INSERT INTO properties (type, price, commission_rate, commission_amount, owner_name, owner_phone, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?)
     """, (
-        context.user_data["type"], context.user_data["price"],
+        full_type, context.user_data["price"],
         context.user_data["commission_rate"], context.user_data["commission_amount"],
         context.user_data["owner_name"], context.user_data["owner_phone"], now_str
     ))
@@ -174,8 +211,7 @@ async def set_owner_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_document(
         document=excel_file,
         filename=f"تحديث_آلي_العمولات_{datetime.now().strftime('%Y%m%d')}.xlsx",
-        caption="📊 <b>تحديث آلي:</b> تم تحديث سجل Excel بالبيانات الجديدة تلقائياً.",
-        parse_mode="HTML"
+        caption="📊 **تحديث آلي:** تم تحديث سجل Excel بالبيانات الجديدة تلقائياً."
     )
     context.user_data.clear()
     return ConversationHandler.END
@@ -190,7 +226,7 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn = sqlite3.connect("real_estate.db")
     cursor = conn.cursor()
     cursor.execute("SELECT COUNT(*) FROM properties")
-    total_count = cursor.fetchone()[0] or 0
+    total_count = cursor.fetchone()[0]
     cursor.execute("SELECT SUM(commission_amount) FROM properties WHERE status IN ('تم البيع', 'تم الإيجار')")
     earned = cursor.fetchone()[0] or 0.0
     cursor.execute("SELECT SUM(commission_amount) FROM properties WHERE status = 'متاح'")
@@ -261,17 +297,14 @@ async def export_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     buffer = BytesIO()
     p = canvas.Canvas(buffer, pagesize=letter)
-    
-    # استخدام خط يدعم العربية (مثلاً Arial أو استخدم Helvetica للإنجليزية وar_text للعربية)
     p.setFont("Helvetica-Bold", 18)
     p.drawString(180, 720, "REAL ESTATE PROPERTY BROCHURE")
     p.line(50, 700, 550, 700)
-    
     p.setFont("Helvetica", 12)
     p.drawString(50, 650, f"Property ID: #{row[0]}")
-    p.drawString(50, 620, f"Offer Type: {ar_text(row[1])}")
+    p.drawString(50, 620, f"Offer Type: {row[1]}")
     p.drawString(50, 590, f"Price: {row[2]:,.2f}")
-    p.drawString(50, 560, f"Status: {ar_text(row[3])}")
+    p.drawString(50, 560, f"Status: {row[3]}")
     p.line(50, 530, 550, 530)
     p.showPage()
     p.save()
@@ -302,17 +335,17 @@ async def list_properties(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
     init_db()
-    bot_token = os.environ.get("BOT_TOKEN")
-    if not bot_token:
-        print("⚠️ خطأ: لم يتم العثور على BOT_TOKEN في متغيرات البيئة!")
+    if not BOT_TOKEN or BOT_TOKEN == "ضع_توكن_البوت_هنا":
+        print("❌ لم يتم إدخال BOT_TOKEN الصحيح!")
         return
 
-    app = Application.builder().token(bot_token).build()
+    app = Application.builder().token(BOT_TOKEN).build()
 
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("add", add_start)],
         states={
             TYPE: [CallbackQueryHandler(type_choice)],
+            RENT_DURATION: [CallbackQueryHandler(rent_duration_choice)],
             PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_price)],
             OWNER_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_owner_name)],
             OWNER_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_owner_phone)],
@@ -328,7 +361,7 @@ def main():
     app.add_handler(CommandHandler("auto_excel", auto_excel))
     app.add_handler(CommandHandler("pdf", export_pdf))
 
-    print("⚡ البوت يعمل الآن...")
+    print("⚡ البوت يعمل الآن بالعمولات الجديدة...")
     app.run_polling()
 
 if __name__ == "__main__":
