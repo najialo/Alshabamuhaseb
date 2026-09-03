@@ -4,7 +4,7 @@ import sqlite3
 import re
 import urllib.request
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -23,12 +23,10 @@ logging.basicConfig(
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "ضع_توكن_البوت_هنا")
 DB_NAME = "ultimate_finance.db"
 
-# --- 1. قاعدة البيانات المتقدمة ---
+# --- 1. قاعدة البيانات ---
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    
-    # جدول المصاريف الشامل
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS expenses (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -40,20 +38,6 @@ def init_db():
             created_at TEXT NOT NULL
         )
     """)
-    
-    # جدول الديون والالتزامات
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS debts (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            person TEXT NOT NULL,
-            amount REAL NOT NULL,
-            type TEXT NOT NULL,
-            status TEXT DEFAULT 'معلق',
-            created_at TEXT NOT NULL
-        )
-    """)
-
-    # جدول الميزانية والإعدادات
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS settings (
             key TEXT PRIMARY KEY,
@@ -61,50 +45,46 @@ def init_db():
         )
     """)
     cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES ('monthly_budget', 0)")
-    
     conn.commit()
     conn.close()
 
-# --- 2. جلب أسعار العملات المباشرة ---
-def get_live_rates():
-    try:
-        url = "https://open.er-api.com/v6/latest/TRY"
-        req = urllib.request.urlopen(url, timeout=5)
-        data = json.loads(req.read().decode())
-        rates = data.get("rates", {})
-        return rates.get("USD", 0), rates.get("EUR", 0)
-    except Exception:
-        return None, None
-
-# --- 3. تصنيف وتفكيك النصوص ---
+# --- 2. محرك تصنيف ذكي وشامل ---
 def detect_category(text: str) -> str:
     text = text.lower()
     categories = {
-        "🍔 طعام وشراب": ["غداء", "عشاء", "فطور", "مطعم", "قهوة", "كافيه", "ماركت", "خضار", "لحمة", "شاورما", "بيتزا"],
-        "🚗 مواصلات وتكاسي": ["بنزين", "تاكسي", "تكسي", "مواقف", "كارت", "مترو", "باص", "تصليح"],
-        "🧾 فواتير واشتراكات": ["كهرباء", "ماء", "نت", "اشتراك", "رصيد", "هاتف", "غاز", "إيجار"],
-        "🛍️ تسوق وملابس": ["قميص", "بنطال", "شوز", "حذاء", "ملابس", "ساعة", "ترينديول", "زارا"],
-        "💊 صحة وعناية": ["صيدلية", "دواء", "دكتور", "مستشفى", "تحليل", "حلاق"],
-        "🏠 منزل ومستلزمات": ["أثاث", "منظفات", "أدوات", "صيانة"]
+        "🛒 سوبرماركت وأغذية": ["حليب", "أكلات", "بيم", "bim", "شوك", "şok", "A101", "a101", "جبنة", "بيض", "لبن", "خبز", "ماركت", "خضار", "فواكه", "لحم", "دجاج", "مياه", "زيت"],
+        "🍔 مطاعم وكافيهات": ["غداء", "عشاء", "فطور", "مطعم", "قهوة", "كافيه", "شاورما", "بيتزا", "برغر", "دونر", "تنتوني", "كباب", "حلويات"],
+        "🚗 مواصلات وتكاسي": ["بنزين", "تاكسي", "تكسي", "مواقف", "كارت", "كرت", "مترو", "باص", "تصليح", "مغسلة", "دولموش"],
+        "🧾 فواتير واشتراكات": ["كهرباء", "ماء", "نت", "أنترنت", "اشتراك", "رصيد", "هاتف", "غاز", "إيجار", "ايجار", "فاتورة"],
+        "🛍️ تسوق وملابس": ["قميص", "بنطال", "شوز", "حذاء", "ملابس", "ساعة", "عطر", "ترينديول", "زارا", "lcw", "ل سي"],
+        "💊 صحة وعناية": ["صيدلية", "دواء", "دكتور", "مستشفى", "تحليل", "علاج", "حلاق", "شامبو"]
     }
     for cat, keywords in categories.items():
         if any(k in text for k in keywords):
             return cat
     return "📦 مصاريف عامة"
 
-# --- 4. تسجيل المصروف واختيار طريقة الدفع مع خيار الحذف ---
+# --- 3. تسجيل المصروف واختيار طريقة الدفع ---
 async def process_expense_entry(text: str, update: Update, context: ContextTypes.DEFAULT_TYPE):
     numbers = re.findall(r'\d+(?:\.\d+)?', text.replace(',', ''))
     if not numbers:
-        await update.message.reply_text("⚠️ يرجى كتابة المبلغ بأرقام واضحة.")
+        await update.message.reply_text("⚠️ يرجى كتابة المبلغ بالأرقام بشكل واضح.")
         return
 
     amount_try = float(numbers[0])
+    
+    # تحديد المكان
     location = "غير محدد"
     if "من" in text:
         loc_match = re.search(r'من\s+([^\s]+(?:\s+[^\s]+)?)', text)
         if loc_match:
             location = loc_match.group(1).strip()
+    else:
+        # التعرّف على المحلات المشهورة كأمكنة تلقائية
+        for place in ["البيم", "بيم", "شوك", "a101", "A101", "ترينديول"]:
+            if place in text.lower():
+                location = place
+                break
 
     category = detect_category(text)
     item = re.sub(r'\d+(?:\.\d+)?', '', text)
@@ -130,26 +110,31 @@ async def process_expense_entry(text: str, update: Update, context: ContextTypes
             InlineKeyboardButton("💵 نقدي (كاش)", callback_data=f"pay_cash_{expense_id}")
         ],
         [
-            InlineKeyboardButton("❌ إلغاء وتراجع", callback_data=f"del_{expense_id}")
+            InlineKeyboardButton("🗑️ مسح المصروف", callback_data=f"del_{expense_id}")
         ]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     await update.message.reply_text(
-        f"📝 **تم تسجيل:** {item} ({amount_try:,.2f} TL)\n"
+        f"✅ **تم تسجيل المصروف!**\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"🏷️ **المنتج:** {item}\n"
+        f"📂 **الفئة:** {category}\n"
+        f"💵 **المبلغ:** {amount_try:,.2f} TL\n"
         f"📍 **المكان:** {location}\n"
-        f"❓ **اختر طريقة الدفع أو التراجع:**",
+        f"🕒 **الوقت:** {now_str}\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"❓ **حدد طريقة الدفع:**",
         reply_markup=reply_markup,
         parse_mode="Markdown"
     )
 
-# --- 5. التفاعل مع الأزرار (طريقة الدفع أو الحذف) ---
+# --- 4. معالجة الأزرار التفاعلية ---
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
 
-    # خيار الحذف التفاعلي
     if data.startswith("del_"):
         expense_id = data.split("_")[1]
         conn = sqlite3.connect(DB_NAME)
@@ -157,10 +142,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cursor.execute("DELETE FROM expenses WHERE id = ?", (expense_id,))
         conn.commit()
         conn.close()
-        await query.edit_message_text("🗑️ **تم مسح المصروف وإلغاؤه بنجاح!**", parse_mode="Markdown")
+        await query.edit_message_text("🗑️ **تم مسح المصروف بنجاح!**", parse_mode="Markdown")
         return
 
-    # خيار اختيار طريقة الدفع
     if data.startswith("pay_"):
         method = "💳 كارت" if "card" in data else "💵 نقدي"
         expense_id = data.split("_")[-1]
@@ -169,107 +153,109 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cursor = conn.cursor()
         cursor.execute("UPDATE expenses SET payment_method = ? WHERE id = ?", (method, expense_id))
         conn.commit()
-
-        cursor.execute("SELECT value FROM settings WHERE key = 'monthly_budget'")
-        budget = cursor.fetchone()[0]
-        
-        current_month = datetime.now().strftime("%Y-%m")
-        cursor.execute("SELECT SUM(amount_try) FROM expenses WHERE created_at LIKE ?", (f"{current_month}%",))
-        total_spent = cursor.fetchone()[0] or 0.0
         conn.close()
 
-        warning = ""
-        if budget > 0:
-            pct = (total_spent / budget) * 100
-            if pct >= 100:
-                warning = "\n\n⚠️ **تنبيه:** لقد تجاوزت الميزانية الشهرية المحسوبة!"
-            elif pct >= 80:
-                warning = f"\n\n⚠️ **تنبيه:** استهلكت {pct:.1f}% من ميزانيتك الشهرية!"
+        await query.edit_message_text(f"✅ **تم اعتماد طريقة الدفع:** {method}", parse_mode="Markdown")
 
-        # إضافة زر حذف بعد الحفظ للضرورة
-        keyboard = [[InlineKeyboardButton("🗑️ مسح هذا المصروف", callback_data=f"del_{expense_id}")]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
+# --- 5. التقرير المالي الشامل المطور ---
+async def detailed_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    now = datetime.now()
+    current_month = now.strftime("%Y-%m")
+    
+    # تحديد تواريخ الأسبوع الحالي والأسبوع الماضي
+    start_this_week = (now - timedelta(days=now.weekday())).strftime("%Y-%m-%d")
+    start_last_week = (now - timedelta(days=now.weekday() + 7)).strftime("%Y-%m-%d")
+    end_last_week = (now - timedelta(days=now.weekday() + 1)).strftime("%Y-%m-%d")
 
-        await query.edit_message_text(
-            f"✅ **تم حفظ طريقة الدفع ({method})**\n"
-            f"📊 **مجموع إنفاق الشهر:** {total_spent:,.2f} TL{warning}",
-            reply_markup=reply_markup,
-            parse_mode="Markdown"
-        )
-
-# --- 6. عرض وتنظيف المصاريف الأخيرة ---
-async def show_recent_expenses(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
-    cursor.execute("SELECT id, item, amount_try, created_at FROM expenses ORDER BY id DESC LIMIT 5")
-    rows = cursor.fetchall()
+    
+    # 1. تفصيل حسب الفئات
+    cursor.execute("""
+        SELECT category, SUM(amount_try), COUNT(*) 
+        FROM expenses 
+        WHERE created_at LIKE ? 
+        GROUP BY category 
+        ORDER BY SUM(amount_try) DESC
+    """, (f"{current_month}%",))
+    category_summary = cursor.fetchall()
+    
+    # 2. الإجمالي الكلي للشهر
+    cursor.execute("SELECT SUM(amount_try) FROM expenses WHERE created_at LIKE ?", (f"{current_month}%",))
+    total_month = cursor.fetchone()[0] or 0.0
+
+    # 3. حساب الأسبوع الحالي
+    cursor.execute("SELECT SUM(amount_try) FROM expenses WHERE date(created_at) >= ?", (start_this_week,))
+    total_this_week = cursor.fetchone()[0] or 0.0
+
+    # 4. حساب الأسبوع الماضي
+    cursor.execute("SELECT SUM(amount_try) FROM expenses WHERE date(created_at) BETWEEN ? AND ?", (start_last_week, end_last_week))
+    total_last_week = cursor.fetchone()[0] or 0.0
+
     conn.close()
 
-    if not rows:
-        await update.message.reply_text("📭 لا يوجد مصاريف مسجلة مؤخراً.")
+    if not category_summary:
+        await update.message.reply_text("📭 لا يوجد مصاريف مسجلة لهذا الشهر حتى الآن.")
         return
 
-    await update.message.reply_text("<b>📋 آخر 5 مصاريف مسجلة (اضغط لمسح أي منها):</b>", parse_mode="HTML")
-    for r in rows:
-        keyboard = [[InlineKeyboardButton(f"❌ مسح ({r[1]})", callback_data=f"del_{r[0]}")]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text(
-            f"🆔 **{r[0]}** | 🛒 {r[1]} | {r[2]:,.2f} TL\n🕒 {r[3]}",
-            reply_markup=reply_markup,
-            parse_mode="Markdown"
-        )
+    # صياغة التقرير والتحليلات
+    top_category = category_summary[0][0]
+    top_amount = category_summary[0][1]
+    top_pct = (top_amount / total_month) * 100 if total_month > 0 else 0
 
-async def delete_expense_by_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("⚠️ اكتب رقم/معرف المصروف، مثال: `/delete 12`", parse_mode="Markdown")
-        return
-    try:
-        exp_id = int(context.args[0])
-        conn = sqlite3.connect(DB_NAME)
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM expenses WHERE id = ?", (exp_id,))
-        conn.commit()
-        conn.close()
-        await update.message.reply_text(f"🗑️ **تم حذف المصروف رقم ({exp_id}) بنجاح!**", parse_mode="Markdown")
-    except ValueError:
-        await update.message.reply_text("❌ يرجى كتابة رقم صحيح.")
+    # حساب فرق الأسابيع
+    week_diff = total_this_week - total_last_week
+    if week_diff > 0:
+        week_analysis = f"📈 **ارتفع إنفاقك هذا الأسبوع** بمقدار `{week_diff:,.2f} TL` عن الأسبوع الماضي."
+    elif week_diff < 0:
+        week_analysis = f"📉 **ممتاز! انخفض إنفاقك هذا الأسبوع** بمقدار `{abs(week_diff):,.2f} TL` مقارنة بالأسبوع الماضي."
+    else:
+        week_analysis = "⚖️ **إنفاقك هذا الأسبوع مساوٍ تماماً** للإنفاق في الأسبوع الماضي."
 
-# --- 7. باقي الأوامر والوظائف ---
-async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("📸 **تم استلام صورة الفاتورة!**\nجاري قراءة البيانات وتحليل الفاتورة بالذكاء الاصطناعي...")
-    await process_expense_entry("فاتورة مشتريات 150 من المحل", update, context)
+    # توليد نصيحة للترشيد بناءً على أعلى فئة
+    if "سوبرماركت" in top_category or "مطاعم" in top_category:
+        tip = "💡 **نصيحة مالية:** أعلى إنفاق لديك على الطعام والمواد الغذائية. يفضل تحضير قائمة قبل الشراء لتقليل الشراء العشوائي."
+    elif "مواصلات" in top_category:
+        tip = "💡 **نصيحة مالية:** قطاع المواصلات يستهلك معظم ميزانيتك. شحن الكرت بمبالغ كبيرة بداية الشهر يحميك من المصاريف الفردية المفاجئة."
+    else:
+        tip = "💡 **نصيحة مالية:** حاول تخصيص 10% من الميزانية للادخار في بداية كل شهر قبل البدء بالإنفاق."
 
-async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🎙️ **تم استلام الملاحظة الصوتية!**\nجاري تحويل الصوت إلى نص وتمرير المعاملة...")
-    await process_expense_entry("اشتريت أغراض بـ 200 ليرة", update, context)
+    msg = (
+        f"📊 **تقرير وتحليل المصاريف الشامل ({current_month})**\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"💰 **إجمالي الإنفاق الشهري:** `{total_month:,.2f} TL`\n\n"
+        f"🔥 **أعلى فئة إنفاق:** {top_category}\n"
+        f"📊 **نسبتها من الميزانية:** `{top_pct:.1f}%` ({top_amount:,.2f} TL)\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"<b>📋 تفصيل الإنفاق حسب الفئات:</b>\n"
+    )
 
-async def set_budget(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("⚠️ اكتب الميزانية بالليرة، مثال: `/set_budget 15000`", parse_mode="Markdown")
-        return
-    try:
-        val = float(context.args[0])
-        conn = sqlite3.connect(DB_NAME)
-        cursor = conn.cursor()
-        cursor.execute("UPDATE settings SET value = ? WHERE key = 'monthly_budget'", (val,))
-        conn.commit()
-        conn.close()
-        await update.message.reply_text(f"🎯 **تم تحديد الميزانية الشهرية بـ:** {val:,.2f} TL")
-    except ValueError:
-        await update.message.reply_text("❌ يرجى إدخال رقم صحيح.")
+    for cat in category_summary:
+        msg += f"• <b>{cat[0]}:</b> {cat[1]:,.2f} TL <i>({cat[2]} عمليات)</i>\n"
 
+    msg += (
+        f"\n━━━━━━━━━━━━━━\n"
+        f"<b>🗓️ تحليل ومقارنة الأسابيع:</b>\n"
+        f"• **إنفاق الأسبوع الحالي:** `{total_this_week:,.2f} TL`\n"
+        f"• **إنفاق الأسبوع الماضي:** `{total_last_week:,.2f} TL`\n"
+        f"{week_analysis}\n\n"
+        f"{tip}\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"💡 <i>للحساب بالدولار أرسل /usd أو باليورو أرسل /eur</i>"
+    )
+
+    await update.message.reply_text(msg, parse_mode="HTML")
+
+# --- 6. باقي الأوامر والتشغيل ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (
         "<b>💎 المساعد المالي الشخصي الفائق</b>\n\n"
-        "أرسل نصاً، صورة فاتورة، أو ملاحظة صوتية وسيقوم البوت بتسجيل المصروف وسؤالك عن طريقة الدفع فوراً!\n\n"
-        "<b>أوامر الحذف والتحكم:</b>\n"
-        "🗑️ /recent — عرض آخر المصاريف لمسح أي منها بضغطة زر\n"
-        "❌ /delete [الرقم] — حذف مصروف محدد بالرقم\n\n"
-        "<b>الأوامر الاحترافية:</b>\n"
-        "🎯 /set_budget [المبلغ] — تحديد ميزانية شهرية\n"
-        "💵 /usd — الحساب بالدولار اللحظي\n"
-        "💶 /eur — الحساب باليورو اللحظي\n"
-        "📦 /backup — استخراج السجل الكامل"
+        "أرسل مشترياتك مباشرة وسيتم تصنيفها وتحديد مكانها وتحديث تحليلاتك فوراً.\n\n"
+        "<b>أوامر التقرير والتحليل:</b>\n"
+        "📊 /report — تقرير مفصل، مقارنة أسابيع، ونصائح ترشيد\n"
+        "💵 /usd — تحويل المجموع للدولار\n"
+        "💶 /eur — تحويل المجموع لليورو\n"
+        "🗑️ /recent — عرض المصاريف الأخيرة لمسح أي منها"
     )
     await update.message.reply_text(msg, parse_mode="HTML")
 
@@ -282,16 +268,11 @@ def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("recent", show_recent_expenses))
-    app.add_handler(CommandHandler("delete", delete_expense_by_id))
-    app.add_handler(CommandHandler("set_budget", set_budget))
+    app.add_handler(CommandHandler("report", detailed_report))
     app.add_handler(CallbackQueryHandler(handle_callback))
-    
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, lambda u, c: process_expense_entry(u.message.text, u, c)))
-    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-    app.add_handler(MessageHandler(filters.VOICE, handle_voice))
 
-    print("⚡ البوت الفائق جاهز ومستعد...")
+    print("⚡ البوت المالي المطور جاهز...")
     app.run_polling()
 
 if __name__ == "__main__":
