@@ -1,7 +1,6 @@
 import logging
 import os
 import sqlite3
-from io import BytesIO
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -13,9 +12,6 @@ from telegram.ext import (
     CallbackQueryHandler,
     filters,
 )
-import openpyxl
-from reportlab.lib.pagesizes import letter
-from reportlab.pdfgen import canvas
 
 # --- الإعدادات الأساسية ---
 logging.basicConfig(
@@ -29,12 +25,11 @@ PROP_TYPE, RENT_DUR, PRICE, AREA, ROOMS, OWNER_NAME, OWNER_PHONE = range(7)
 # مراحل محادثة إضافة عميل
 CLIENT_NAME, CLIENT_PHONE, CLIENT_AREA, CLIENT_PRICE, CLIENT_ROOMS = range(7, 12)
 
-# --- 1. تهيئة قاعدة البيانات الشاملة ---
+# --- 1. تهيئة قاعدة البيانات ---
 def init_db():
     conn = sqlite3.connect("alshahbaa_master.db")
     cursor = conn.cursor()
     
-    # جدول العقارات
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS properties (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -53,7 +48,6 @@ def init_db():
         )
     """)
     
-    # جدول العملاء وطلباتهم
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS clients (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -66,11 +60,10 @@ def init_db():
         )
     """)
 
-    # جدول المصاريف والإيرادات
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS finance (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            type TEXT NOT NULL, -- إيراد / مصروف
+            type TEXT NOT NULL,
             title TEXT NOT NULL,
             amount REAL NOT NULL,
             date TEXT NOT NULL
@@ -80,11 +73,7 @@ def init_db():
     conn.commit()
     conn.close()
 
-# السباحة العامة: السماح للجميع باستخدام البوت دون تحقّق
-def is_admin(user_id: int) -> bool:
-    return True
-
-# --- 2. قائمة المساعدة الرئيسية الشاملة ---
+# --- 2. القائمة الرئيسية ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     menu_text = (
         "<b>🧠 مساعد الشهباء العقاري الذكي</b>\n\n"
@@ -99,18 +88,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "👥 /clients — قائمة العملاء\n"
         "➕ /add_client — إضافة عميل جديد\n"
         "🎯 /matches — مطابقة العملاء والعقارات تلقائياً\n\n"
-        "<b>💰 المال والعمولات:</b>\n"
-        "📊 /stats — لوحة التحليل المالي\n"
-        "📥 /auto_excel — تصدير تقرير Excel المالي\n\n"
-        "<b>📢 التسويق:</b>\n"
+        "<b>📢 التسويق والأوامر العامة:</b>\n"
         "✍️ /caption [ID] — كتابة منشور تسويقي\n"
-        "📄 /pdf [ID] — إنشاء بروشور PDF\n"
         "❌ /cancel — إلغاء العملية الحالية\n"
         "━━━━━━━━━━━━━━"
     )
     await update.message.reply_text(menu_text, parse_mode="HTML")
 
-# --- 3. نظام إضافة العقارات وحساب العمولات ---
+# --- 3. إضافة العقارات ---
 async def add_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [[InlineKeyboardButton("🏠 للبيع", callback_data="للبيع"), InlineKeyboardButton("🔑 للإيجار", callback_data="للإيجار")]]
     await update.message.reply_text("اختر نوع العرض:", reply_markup=InlineKeyboardMarkup(keyboard))
@@ -211,7 +196,7 @@ async def set_owner_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     return ConversationHandler.END
 
-# --- 4. نظام إضافة العملاء والمطابقة الذكية ---
+# --- 4. إضافة العملاء والمطابقة ---
 async def add_client_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("أدخل **اسم العميل**: ")
     return CLIENT_NAME
@@ -263,6 +248,82 @@ async def set_client_rooms(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ أدخل رقماً لعدد الغرف:")
         return CLIENT_ROOMS
 
+# --- 5. الأوامر المسترجعة والمضافة (تم إصلاحها) ---
+
+# أمر /list
+async def list_properties(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    conn = sqlite3.connect("alshahbaa_master.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, title, price, status, type FROM properties ORDER BY id DESC LIMIT 20")
+    props = cursor.fetchall()
+    conn.close()
+
+    if not props:
+        await update.message.reply_text("📭 لا يوجد عقارات مسجلة حتى الآن.")
+        return
+
+    msg = "<b>📋 قائمة العقارات المسجلة:</b>\n\n"
+    for p in props:
+        msg += f"<b>#{p[0]}</b> | {p[1]} | {p[4]}\n💰 السعر: ${p[2]:,.0f} | الحالة: {p[3]}\n------------------------\n"
+    await update.message.reply_text(msg, parse_mode="HTML")
+
+# أمر /available
+async def available_properties(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    conn = sqlite3.connect("alshahbaa_master.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, title, price, type FROM properties WHERE status = 'متاح' ORDER BY id DESC")
+    props = cursor.fetchall()
+    conn.close()
+
+    if not props:
+        await update.message.reply_text("🏷️ لا يوجد عقارات متاحة حالياً.")
+        return
+
+    msg = "<b>🏷️ العقارات المتاحة حالياً:</b>\n\n"
+    for p in props:
+        msg += f"<b>#{p[0]}</b> | {p[1]} ({p[3]})\n💰 ${p[2]:,.0f}\n------------------------\n"
+    await update.message.reply_text(msg, parse_mode="HTML")
+
+# أمر /clients
+async def list_clients(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    conn = sqlite3.connect("alshahbaa_master.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, name, phone, pref_area, max_price FROM clients ORDER BY id DESC")
+    clients = cursor.fetchall()
+    conn.close()
+
+    if not clients:
+        await update.message.reply_text("👤 لا يوجد عملاء مسجلون حالياً.")
+        return
+
+    msg = "<b>👥 قائمة العملاء المسجلين:</b>\n\n"
+    for c in clients:
+        msg += f"<b>#{c[0]}</b> {c[1]} ({c[2]})\n📍 الطلب: {c[3]} | بسعر حتى ${c[4]:,.0f}\n------------------------\n"
+    await update.message.reply_text(msg, parse_mode="HTML")
+
+# أمر /search
+async def search_properties(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text("⚠️ يرجى كتابة كلمة للبحث، مثال: <code>/search الحمدانية</code>", parse_mode="HTML")
+        return
+
+    query_str = "%" + " ".join(context.args) + "%"
+    conn = sqlite3.connect("alshahbaa_master.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, title, price, area, status FROM properties WHERE title LIKE ? OR area LIKE ?", (query_str, query_str))
+    props = cursor.fetchall()
+    conn.close()
+
+    if not props:
+        await update.message.reply_text("🔍 لم يتم العثور على نتائج تطابق بحثك.")
+        return
+
+    msg = f"<b>🔍 نتائج البحث عن ('{' '.join(context.args)}'):</b>\n\n"
+    for p in props:
+        msg += f"<b>#{p[0]}</b> | {p[1]}\n📍 {p[3]} | 💰 ${p[2]:,.0f} | ({p[4]})\n------------------------\n"
+    await update.message.reply_text(msg, parse_mode="HTML")
+
+# أمر /matches
 async def smart_matches(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn = sqlite3.connect("alshahbaa_master.db")
     cursor = conn.cursor()
@@ -274,7 +335,7 @@ async def smart_matches(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn.close()
         return
 
-    report = "<b>🎯 محرك المطابقة الذكي (العملاء والعقارات):</b>\n\n"
+    report = "<b>🎯 محرك المطابقة الذكي:</b>\n\n"
     found = False
     for c in clients:
         cursor.execute("""
@@ -296,7 +357,7 @@ async def smart_matches(update: Update, context: ContextTypes.DEFAULT_TYPE):
         report += "لم يتم العثور على مطابقات جديدة حالياً."
     await update.message.reply_text(report, parse_mode="HTML")
 
-# --- 5. التسويق وقوالب المنشورات والبروشور ---
+# أمر /caption
 async def generate_caption(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("⚠️ حدد رقم العقار. مثال: <code>/caption 1</code>", parse_mode="HTML")
@@ -321,25 +382,27 @@ async def generate_caption(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"💰 <b>السعر:</b> ${p[3]:,.0f}\n\n"
         "✨ جاهز للتسليم الفوري مع كافة الخدمات!\n\n"
         "📞 <b>للتواصل والاستفسار:</b>\n"
-        "مكتب الشهباء العقاري - حلب، سوريا\n"
-        "📱 اتصل بنا الآن للمعاينة!"
+        "مكتب الشهباء العقاري\n"
     )
     await update.message.reply_text(post, parse_mode="HTML")
 
-# --- 6. الإلغاء والأوامر العامة ---
+# أمر الإلغاء
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
-    await update.message.reply_text("❌ تم إلغاء العملية.")
+    await update.message.reply_text("❌ تم إلغاء العملية بنجاح. يمكنك الآن استخدام أي أمر آخر.")
     return ConversationHandler.END
 
 # --- التشغيل الرئيسي ---
 def main():
     init_db()
-    if not BOT_TOKEN or BOT_TOKEN == "ضع_توكن_البوت_هنا":
+    if not BOT_TOKEN or BOT_TOKEN == "ضع_توكن_بارامتر_هنا":
         print("❌ الرجاء ضبط BOT_TOKEN!")
         return
 
     app = Application.builder().token(BOT_TOKEN).build()
+
+    # تصفية الرسائل بحيث لا تقبل الأوامر كمدخلات نصية داخل المحادثة
+    text_filter = filters.TEXT & ~filters.COMMAND
 
     # محادثة إضافة عقار
     prop_conv = ConversationHandler(
@@ -347,11 +410,11 @@ def main():
         states={
             PROP_TYPE: [CallbackQueryHandler(prop_type_choice)],
             RENT_DUR: [CallbackQueryHandler(rent_dur_choice)],
-            PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_price)],
-            AREA: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_area)],
-            ROOMS: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_rooms)],
-            OWNER_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_owner_name)],
-            OWNER_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_owner_phone)],
+            PRICE: [MessageHandler(text_filter, set_price)],
+            AREA: [MessageHandler(text_filter, set_area)],
+            ROOMS: [MessageHandler(text_filter, set_rooms)],
+            OWNER_NAME: [MessageHandler(text_filter, set_owner_name)],
+            OWNER_PHONE: [MessageHandler(text_filter, set_owner_phone)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
     )
@@ -360,22 +423,29 @@ def main():
     client_conv = ConversationHandler(
         entry_points=[CommandHandler("add_client", add_client_start)],
         states={
-            CLIENT_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_client_name)],
-            CLIENT_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_client_phone)],
-            CLIENT_AREA: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_client_area)],
-            CLIENT_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_client_price)],
-            CLIENT_ROOMS: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_client_rooms)],
+            CLIENT_NAME: [MessageHandler(text_filter, set_client_name)],
+            CLIENT_PHONE: [MessageHandler(text_filter, set_client_phone)],
+            CLIENT_AREA: [MessageHandler(text_filter, set_client_area)],
+            CLIENT_PRICE: [MessageHandler(text_filter, set_client_price)],
+            CLIENT_ROOMS: [MessageHandler(text_filter, set_client_rooms)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
     )
 
+    # تسجيل المحادثات والأوامر
     app.add_handler(CommandHandler("start", start))
     app.add_handler(prop_conv)
     app.add_handler(client_conv)
+    
+    # ربط الأوامر العامة
+    app.add_handler(CommandHandler("list", list_properties))
+    app.add_handler(CommandHandler("available", available_properties))
+    app.add_handler(CommandHandler("clients", list_clients))
+    app.add_handler(CommandHandler("search", search_properties))
     app.add_handler(CommandHandler("matches", smart_matches))
     app.add_handler(CommandHandler("caption", generate_caption))
 
-    print("⚡ البوت مفتوح للجميع وجاهز للاستخدام...")
+    print("⚡ البوت جاهز ويعمل بكفاءة عالية...")
     app.run_polling()
 
 if __name__ == "__main__":
