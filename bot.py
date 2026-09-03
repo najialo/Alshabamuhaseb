@@ -7,9 +7,8 @@ from telegram.ext import (
     Application,
     CommandHandler,
     ContextTypes,
-    ConversationHandler,
-    MessageHandler,
     CallbackQueryHandler,
+    MessageHandler,
     filters,
 )
 
@@ -19,35 +18,31 @@ logging.basicConfig(
 )
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "ضع_توكن_البوت_هنا")
+DB_NAME = "alshahbaa_master.db"
 
-# مراحل محادثة إضافة العقار
-PROP_TYPE, RENT_DUR, PRICE, AREA, ROOMS, OWNER_NAME, OWNER_PHONE = range(7)
-# مراحل محادثة إضافة عميل
-CLIENT_NAME, CLIENT_PHONE, CLIENT_AREA, CLIENT_PRICE, CLIENT_ROOMS = range(7, 12)
-
-# --- 1. تهيئة قاعدة البيانات ---
+# --- 1. تهيئة قاعدة البيانات الآمنة (غير القابلة لللمسح) ---
 def init_db():
-    conn = sqlite3.connect("alshahbaa_master.db")
+    conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     
+    # جدول العقارات بحالة أمان (is_deleted = 0)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS properties (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            title TEXT,
+            title TEXT NOT NULL,
             type TEXT NOT NULL,
             price REAL NOT NULL,
             area TEXT NOT NULL,
             rooms INTEGER NOT NULL,
-            commission_rate REAL NOT NULL,
-            commission_amount REAL NOT NULL,
             owner_name TEXT NOT NULL,
             owner_phone TEXT NOT NULL,
             status TEXT DEFAULT 'متاح',
-            featured INTEGER DEFAULT 0,
+            is_deleted INTEGER DEFAULT 0,
             created_at TEXT NOT NULL
         )
     """)
     
+    # جدول العملاء بحالة أمان (is_deleted = 0)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS clients (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -56,396 +51,206 @@ def init_db():
             pref_area TEXT NOT NULL,
             max_price REAL NOT NULL,
             pref_rooms INTEGER NOT NULL,
+            is_deleted INTEGER DEFAULT 0,
             created_at TEXT NOT NULL
         )
     """)
-
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS finance (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            type TEXT NOT NULL,
-            title TEXT NOT NULL,
-            amount REAL NOT NULL,
-            date TEXT NOT NULL
-        )
-    """)
-
     conn.commit()
     conn.close()
 
-# --- 2. القائمة الرئيسية ---
+# --- 2. القائمة الرئيسية التفاعلية الأنيقة ---
+def get_main_menu_keyboard():
+    keyboard = [
+        [InlineKeyboardButton("➕ إضافة عقار سريع", callback_data="menu_add_prop"), InlineKeyboardButton("👥 إضافة عميل سريع", callback_data="menu_add_client")],
+        [InlineKeyboardButton("📋 العقارات المتاحة", callback_data="menu_list_props"), InlineKeyboardButton("👨‍💼 قائمة العملاء", callback_data="menu_list_clients")],
+        [InlineKeyboardButton("🎯 المطابقة الذكية", callback_data="menu_matches"), InlineKeyboardButton("📦 نسخة احتياطية للبيانات", callback_data="menu_backup")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    menu_text = (
-        "<b>🧠 مساعد الشهباء العقاري الذكي</b>\n\n"
-        "مرحباً بك في نظام إدارة مكتب الشهباء العقاري 🏠\n"
-        "━━━━━━━━━━━━━━\n"
-        "<b>🏠 إدارة العقارات:</b>\n"
-        "➕ /add — إضافة عقار جديد\n"
-        "📋 /list — عرض جميع العقارات\n"
-        "🔍 /search [كلمة] — البحث عن عقار\n"
-        "🏷️ /available — العقارات المتاحة\n\n"
-        "<b>👨‍💼 العملاء والمطابقة:</b>\n"
-        "👥 /clients — قائمة العملاء\n"
-        "➕ /add_client — إضافة عميل جديد\n"
-        "🎯 /matches — مطابقة العملاء والعقارات تلقائياً\n\n"
-        "<b>📢 التسويق والأوامر العامة:</b>\n"
-        "✍️ /caption [ID] — كتابة منشور تسويقي\n"
-        "❌ /cancel — إلغاء العملية الحالية\n"
-        "━━━━━━━━━━━━━━"
+    msg = (
+        "<b>🏠 مرحباً بك في نظام الشهباء العقاري الذكي</b>\n\n"
+        "النظام يعمل بتقنية **الأرشيف الدائم** لحماية كافة بياناتك من المسح نهائياً.\n"
+        "اختر العملية من الأزرار أدناه للبدء السريع:"
     )
-    await update.message.reply_text(menu_text, parse_mode="HTML")
+    if update.message:
+        await update.message.reply_text(msg, reply_markup=get_main_menu_keyboard(), parse_mode="HTML")
+    elif update.callback_query:
+        await update.callback_query.message.reply_text(msg, reply_markup=get_main_menu_keyboard(), parse_mode="HTML")
 
-# --- 3. إضافة العقارات ---
-async def add_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [[InlineKeyboardButton("🏠 للبيع", callback_data="للبيع"), InlineKeyboardButton("🔑 للإيجار", callback_data="للإيجار")]]
-    await update.message.reply_text("اختر نوع العرض:", reply_markup=InlineKeyboardMarkup(keyboard))
-    return PROP_TYPE
-
-async def prop_type_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    choice = query.data
-    context.user_data["type"] = choice
-
-    if choice == "للإيجار":
-        keyboard = [
-            [InlineKeyboardButton("📅 سنوي (أجار شهر)", callback_data="rent_yearly")],
-            [InlineKeyboardButton("🗓️ شهري (+33%)", callback_data="rent_monthly")],
-            [InlineKeyboardButton("⏳ أسبوعين (+45%)", callback_data="rent_two_weeks")],
-            [InlineKeyboardButton("📆 أسبوعي (+85%)", callback_data="rent_weekly")],
-            [InlineKeyboardButton("☀️ يومي (+45%)", callback_data="rent_daily")]
-        ]
-        await query.edit_message_text("اختر **مدة الإيجار** لحساب العمولة تلقائياً:", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
-        return RENT_DUR
-    else:
-        context.user_data["commission_rate"] = 2.5
-        await query.edit_message_text("أدخل **السعر الإجمالي للبيع** ($):")
-        return PRICE
-
-async def rent_dur_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    rates_map = {
-        "rent_yearly": (8.33, "سنوي"), "rent_monthly": (33.0, "شهري"),
-        "rent_two_weeks": (45.0, "أسبوعين"), "rent_weekly": (85.0, "أسبوعي"),
-        "rent_daily": (45.0, "يومي")
-    }
-    rate, label = rates_map.get(query.data, (8.33, "إيجار"))
-    context.user_data["commission_rate"] = rate
-    context.user_data["rent_label"] = label
-    await query.edit_message_text(f"مدة الإيجار: <b>{label}</b>\nأدخل **مبلغ الإيجار/حق المالك** ($):", parse_mode="HTML")
-    return PRICE
-
-async def set_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        price = float(update.message.text.replace(",", ""))
-        context.user_data["price"] = price
-        comm_rate = context.user_data["commission_rate"]
-        context.user_data["commission_amount"] = (price * comm_rate) / 100
-        await update.message.reply_text("أدخل **المنطقة/الاسم العقاري** (مثال: الحمدانية):")
-        return AREA
-    except ValueError:
-        await update.message.reply_text("❌ يرجى إدخال أرقام فقط للسعر:")
-        return PRICE
-
-async def set_area(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["area"] = update.message.text.strip()
-    await update.message.reply_text("أدخل **عدد الغرف** (أرقام فقط, مثال: 3):")
-    return ROOMS
-
-async def set_rooms(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        context.user_data["rooms"] = int(update.message.text.strip())
-        await update.message.reply_text("أدخل **اسم المالك**: ")
-        return OWNER_NAME
-    except ValueError:
-        await update.message.reply_text("❌ يرجى إدخال رقم لعدد الغرف:")
-        return ROOMS
-
-async def set_owner_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["owner_name"] = update.message.text.strip()
-    await update.message.reply_text("أدخل **رقم هاتف المالك**: ")
-    return OWNER_PHONE
-
-async def set_owner_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["owner_phone"] = update.message.text.strip()
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+# --- 3. الإدخال السريع الذكي برسالة واحدة ---
+async def handle_quick_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
     
-    full_type = context.user_data["type"]
-    if context.user_data.get("rent_label"):
-        full_type += f" ({context.user_data['rent_label']})"
+    # طريقة الإدخال السريع للعقار: عقار | بيع/إيجار | السعر | المنطقة | الغرف | اسم المالك | رقم المالك
+    if text.startswith("عقار"):
+        try:
+            parts = [p.strip() for p in text.split("|")]
+            if len(parts) < 7:
+                await update.message.reply_text(
+                    "⚠️ **صيغة إضافة عقار غير مكتملة!**\n"
+                    "استخدم الصيغة السريعة التالية:\n"
+                    "<code>عقار | للبيع | 50000 | الحمدانية | 3 | أحمد | 0912345678</code>",
+                    parse_mode="HTML"
+                )
+                return
 
-    title = f"عقار {context.user_data['rooms']} غرف في {context.user_data['area']}"
+            _, p_type, price, area, rooms, owner, phone = parts
+            now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+            title = f"عقار {rooms} غرف في {area}"
 
-    conn = sqlite3.connect("alshahbaa_master.db")
+            conn = sqlite3.connect(DB_NAME)
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO properties (title, type, price, area, rooms, owner_name, owner_phone, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (title, p_type, float(price), area, int(rooms), owner, phone, now_str))
+            prop_id = cursor.lastrowid
+            conn.commit()
+            conn.close()
+
+            await update.message.reply_text(f"✅ **تم حفظ العقار #{prop_id} بنجاح وللأبد!**", parse_mode="HTML")
+            
+            # فحص المطابقة التلقائي والإشعار
+            await check_matches_for_prop(update, area, float(price), int(rooms))
+        except Exception as e:
+            await update.message.reply_text("❌ حدث خطأ في البيانات المكتوبة. يرجى التأكد من كتابة الأرقام بشكل صحيح.")
+
+    # طريقة الإدخال السريع للعميل: عميل | الاسم | الهاتف | المنطقة | السعر الأقصى | الغرف
+    elif text.startswith("عميل"):
+        try:
+            parts = [p.strip() for p in text.split("|")]
+            if len(parts) < 6:
+                await update.message.reply_text(
+                    "⚠️ **صيغة إضافة عميل غير مكتملة!**\n"
+                    "استخدم الصيغة السريعة التالية:\n"
+                    "<code>عميل | محمد | 0987654321 | الحمدانية | 55000 | 3</code>",
+                    parse_mode="HTML"
+                )
+                return
+
+            _, name, phone, area, max_price, rooms = parts
+            now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+            conn = sqlite3.connect(DB_NAME)
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO clients (name, phone, pref_area, max_price, pref_rooms, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (name, phone, area, float(max_price), int(rooms), now_str))
+            client_id = cursor.lastrowid
+            conn.commit()
+            conn.close()
+
+            await update.message.reply_text(f"👤 **تم تسجيل ملف العميل #{client_id} بنجاح!**", parse_mode="HTML")
+        except Exception as e:
+            await update.message.reply_text("❌ حدث خطأ في إدخال بيانات العميل.")
+
+# --- 4. المحرك التلقائي للمطابقة والإشعارات ---
+async def check_matches_for_prop(update: Update, area: str, price: float, rooms: int):
+    conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute("""
-        INSERT INTO properties (title, type, price, area, rooms, commission_rate, commission_amount, owner_name, owner_phone, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (
-        title, full_type, context.user_data["price"], context.user_data["area"],
-        context.user_data["rooms"], context.user_data["commission_rate"],
-        context.user_data["commission_amount"], context.user_data["owner_name"],
-        context.user_data["owner_phone"], now_str
-    ))
-    prop_id = cursor.lastrowid
-    conn.commit()
+        SELECT name, phone FROM clients 
+        WHERE is_deleted = 0 AND pref_area LIKE ? AND max_price >= ? AND pref_rooms <= ?
+    """, (f"%{area}%", price, rooms))
+    matched_clients = cursor.fetchall()
     conn.close()
 
-    await update.message.reply_text(f"🎉 <b>تم حفظ العقار #{prop_id} بنجاح!</b>", parse_mode="HTML")
-    context.user_data.clear()
-    return ConversationHandler.END
+    if matched_clients:
+        alert = "🎯 <b>إشعار مطابقة فورية!</b>\nهذا العقار الجديد يناسب العملاء التاليين:\n\n"
+        for c in matched_clients:
+            alert += f"• <b>{c[0]}</b> - هاتف: <code>{c[1]}</code>\n"
+        await update.message.reply_text(alert, parse_mode="HTML")
 
-# --- 4. إضافة العملاء والمطابقة ---
-async def add_client_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("أدخل **اسم العميل**: ")
-    return CLIENT_NAME
+# --- 5. استعراض البيانات والنسخ الاحتياطي ---
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
 
-async def set_client_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["c_name"] = update.message.text.strip()
-    await update.message.reply_text("أدخل **رقم هاتف العميل**: ")
-    return CLIENT_PHONE
+    if data == "menu_add_prop":
+        msg = (
+            "<b>➕ إضافة عقار برسالة واحدة:</b>\n\n"
+            "انسخ الرسالة التالية وعدل عليها ثم أرسلها للبوت مباشرة:\n\n"
+            "<code>عقار | للبيع | 50000 | الحمدانية | 3 | المالك أحمد | 0912345678</code>"
+        )
+        await query.message.reply_text(msg, parse_mode="HTML")
 
-async def set_client_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["c_phone"] = update.message.text.strip()
-    await update.message.reply_text("أدخل **المنطقة المطلوبة** (مثال: الحمدانية): ")
-    return CLIENT_AREA
+    elif data == "menu_add_client":
+        msg = (
+            "<b>👥 إضافة عميل برسالة واحدة:</b>\n\n"
+            "انسخ الرسالة التالية وعدل عليها ثم أرسلها للبوت مباشرة:\n\n"
+            "<code>عميل | محمود | 0987654321 | الحمدانية | 55000 | 3</code>"
+        )
+        await query.message.reply_text(msg, parse_mode="HTML")
 
-async def set_client_area(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["c_area"] = update.message.text.strip()
-    await update.message.reply_text("أدخل **الحد الأقصى للسعر** ($): ")
-    return CLIENT_PRICE
-
-async def set_client_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        context.user_data["c_price"] = float(update.message.text.replace(",", ""))
-        await update.message.reply_text("أدخل **عدد الغرف المطلوب**: ")
-        return CLIENT_ROOMS
-    except ValueError:
-        await update.message.reply_text("❌ أدخل رقماً صحيحاً للسعر:")
-        return CLIENT_PRICE
-
-async def set_client_rooms(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        rooms = int(update.message.text.strip())
-        now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
-        conn = sqlite3.connect("alshahbaa_master.db")
+    elif data == "menu_list_props":
+        conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
-        cursor.execute("""
-            INSERT INTO clients (name, phone, pref_area, max_price, pref_rooms, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, (
-            context.user_data["c_name"], context.user_data["c_phone"],
-            context.user_data["c_area"], context.user_data["c_price"], rooms, now_str
-        ))
-        conn.commit()
+        cursor.execute("SELECT id, title, price, type, owner_phone FROM properties WHERE is_deleted = 0 ORDER BY id DESC")
+        props = cursor.fetchall()
         conn.close()
 
-        await update.message.reply_text("✅ <b>تم حفظ ملف العميل بنجاح!</b> يمكنك استخدام /matches لمطابقة طلباته.", parse_mode="HTML")
-        context.user_data.clear()
-        return ConversationHandler.END
-    except ValueError:
-        await update.message.reply_text("❌ أدخل رقماً لعدد الغرف:")
-        return CLIENT_ROOMS
+        if not props:
+            await query.message.reply_text("📭 لا يوجد عقارات مضافة في السجل.")
+            return
 
-# --- 5. الأوامر المسترجعة والمضافة (تم إصلاحها) ---
+        msg = "<b>📋 العقارات المسجلة المحفوظة:</b>\n\n"
+        for p in props:
+            msg += f"<b>#{p[0]}</b> - {p[1]} ({p[3]})\n💰 ${p[2]:,.0f} | 📱 {p[4]}\n------------------\n"
+        await query.message.reply_text(msg, parse_mode="HTML")
 
-# أمر /list
-async def list_properties(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    conn = sqlite3.connect("alshahbaa_master.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, title, price, status, type FROM properties ORDER BY id DESC LIMIT 20")
-    props = cursor.fetchall()
-    conn.close()
-
-    if not props:
-        await update.message.reply_text("📭 لا يوجد عقارات مسجلة حتى الآن.")
-        return
-
-    msg = "<b>📋 قائمة العقارات المسجلة:</b>\n\n"
-    for p in props:
-        msg += f"<b>#{p[0]}</b> | {p[1]} | {p[4]}\n💰 السعر: ${p[2]:,.0f} | الحالة: {p[3]}\n------------------------\n"
-    await update.message.reply_text(msg, parse_mode="HTML")
-
-# أمر /available
-async def available_properties(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    conn = sqlite3.connect("alshahbaa_master.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, title, price, type FROM properties WHERE status = 'متاح' ORDER BY id DESC")
-    props = cursor.fetchall()
-    conn.close()
-
-    if not props:
-        await update.message.reply_text("🏷️ لا يوجد عقارات متاحة حالياً.")
-        return
-
-    msg = "<b>🏷️ العقارات المتاحة حالياً:</b>\n\n"
-    for p in props:
-        msg += f"<b>#{p[0]}</b> | {p[1]} ({p[3]})\n💰 ${p[2]:,.0f}\n------------------------\n"
-    await update.message.reply_text(msg, parse_mode="HTML")
-
-# أمر /clients
-async def list_clients(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    conn = sqlite3.connect("alshahbaa_master.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, name, phone, pref_area, max_price FROM clients ORDER BY id DESC")
-    clients = cursor.fetchall()
-    conn.close()
-
-    if not clients:
-        await update.message.reply_text("👤 لا يوجد عملاء مسجلون حالياً.")
-        return
-
-    msg = "<b>👥 قائمة العملاء المسجلين:</b>\n\n"
-    for c in clients:
-        msg += f"<b>#{c[0]}</b> {c[1]} ({c[2]})\n📍 الطلب: {c[3]} | بسعر حتى ${c[4]:,.0f}\n------------------------\n"
-    await update.message.reply_text(msg, parse_mode="HTML")
-
-# أمر /search
-async def search_properties(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("⚠️ يرجى كتابة كلمة للبحث، مثال: <code>/search الحمدانية</code>", parse_mode="HTML")
-        return
-
-    query_str = "%" + " ".join(context.args) + "%"
-    conn = sqlite3.connect("alshahbaa_master.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, title, price, area, status FROM properties WHERE title LIKE ? OR area LIKE ?", (query_str, query_str))
-    props = cursor.fetchall()
-    conn.close()
-
-    if not props:
-        await update.message.reply_text("🔍 لم يتم العثور على نتائج تطابق بحثك.")
-        return
-
-    msg = f"<b>🔍 نتائج البحث عن ('{' '.join(context.args)}'):</b>\n\n"
-    for p in props:
-        msg += f"<b>#{p[0]}</b> | {p[1]}\n📍 {p[3]} | 💰 ${p[2]:,.0f} | ({p[4]})\n------------------------\n"
-    await update.message.reply_text(msg, parse_mode="HTML")
-
-# أمر /matches
-async def smart_matches(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    conn = sqlite3.connect("alshahbaa_master.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT name, phone, pref_area, max_price, pref_rooms FROM clients")
-    clients = cursor.fetchall()
-
-    if not clients:
-        await update.message.reply_text("📭 لا يوجد عملاء مسجلون حالياً.")
+    elif data == "menu_list_clients":
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, name, phone, pref_area, max_price FROM clients WHERE is_deleted = 0 ORDER BY id DESC")
+        clients = cursor.fetchall()
         conn.close()
-        return
 
-    report = "<b>🎯 محرك المطابقة الذكي:</b>\n\n"
-    found = False
-    for c in clients:
-        cursor.execute("""
-            SELECT id, title, price, area, rooms FROM properties 
-            WHERE status = 'متاح' AND area LIKE ? AND price <= ? AND rooms >= ?
-        """, (f"%{c[2]}%", c[3], c[4]))
-        matches = cursor.fetchall()
-        if matches:
-            found = True
-            report += f"👤 <b>العميل:</b> {c[0]} ({c[1]})\n"
-            report += f"🎯 <b>الطلب:</b> {c[2]} | {c[4]} غرف | حتى ${c[3]:,.0f}\n"
-            report += "🏡 <b>العقارات المطابقة:</b>\n"
-            for m in matches:
-                report += f"   • <b>#{m[0]}</b> - {m[1]} | ${m[2]:,.0f}\n"
-            report += "----------------------------\n"
+        if not clients:
+            await query.message.reply_text("👤 لا يوجد عملاء في السجل حالياً.")
+            return
 
-    conn.close()
-    if not found:
-        report += "لم يتم العثور على مطابقات جديدة حالياً."
-    await update.message.reply_text(report, parse_mode="HTML")
+        msg = "<b>👥 قائمة العملاء:</b>\n\n"
+        for c in clients:
+            msg += f"<b>#{c[0]}</b> {c[1]} (<code>{c[2]}</code>)\n📍 {c[3]} | حتى ${c[4]:,.0f}\n------------------\n"
+        await query.message.reply_text(msg, parse_mode="HTML")
 
-# أمر /caption
-async def generate_caption(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("⚠️ حدد رقم العقار. مثال: <code>/caption 1</code>", parse_mode="HTML")
-        return
+    elif data == "menu_backup":
+        if os.path.exists(DB_NAME):
+            await query.message.reply_document(
+                document=open(DB_NAME, "rb"),
+                caption=f"📦 **نسخة احتياطية شاملة للبيانات**\nتاريخ الصدور: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+                parse_mode="Markdown"
+            )
+        else:
+            await query.message.reply_text("❌ لم يتم العثور على ملف قاعدة البيانات.")
 
-    conn = sqlite3.connect("alshahbaa_master.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, title, type, price, area, rooms FROM properties WHERE id = ?", (context.args[0],))
-    p = cursor.fetchone()
-    conn.close()
-
-    if not p:
-        await update.message.reply_text("❌ العقار غير موجود.")
-        return
-
-    post = (
-        f"🏠 <b>عرض عقاري مميز - مكتب الشهباء</b> 🏠\n\n"
-        f"📌 <b>العنوان:</b> {p[1]}\n"
-        f"🏷️ <b>النوع:</b> {p[2]}\n"
-        f"📍 <b>المنطقة:</b> {p[4]}\n"
-        f"🚪 <b>عدد الغرف:</b> {p[5]}\n"
-        f"💰 <b>السعر:</b> ${p[3]:,.0f}\n\n"
-        "✨ جاهز للتسليم الفوري مع كافة الخدمات!\n\n"
-        "📞 <b>للتواصل والاستفسار:</b>\n"
-        "مكتب الشهباء العقاري\n"
-    )
-    await update.message.reply_text(post, parse_mode="HTML")
-
-# أمر الإلغاء
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data.clear()
-    await update.message.reply_text("❌ تم إلغاء العملية بنجاح. يمكنك الآن استخدام أي أمر آخر.")
-    return ConversationHandler.END
+# أمر النسخ الاحتياطي اليدوي عبر /backup
+async def backup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if os.path.exists(DB_NAME):
+        await update.message.reply_document(
+            document=open(DB_NAME, "rb"),
+            caption=f"📦 **نسخة احتياطية شاملة للبيانات**\nتاريخ: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+            parse_mode="Markdown"
+        )
 
 # --- التشغيل الرئيسي ---
 def main():
     init_db()
-    if not BOT_TOKEN or BOT_TOKEN == "ضع_توكن_بارامتر_هنا":
-        print("❌ الرجاء ضبط BOT_TOKEN!")
+    if not BOT_TOKEN or BOT_TOKEN == "ضع_توكن_البوت_هنا":
+        print("❌ يرجى كتابة التوكن الصحيح!")
         return
 
     app = Application.builder().token(BOT_TOKEN).build()
 
-    # تصفية الرسائل بحيث لا تقبل الأوامر كمدخلات نصية داخل المحادثة
-    text_filter = filters.TEXT & ~filters.COMMAND
-
-    # محادثة إضافة عقار
-    prop_conv = ConversationHandler(
-        entry_points=[CommandHandler("add", add_start)],
-        states={
-            PROP_TYPE: [CallbackQueryHandler(prop_type_choice)],
-            RENT_DUR: [CallbackQueryHandler(rent_dur_choice)],
-            PRICE: [MessageHandler(text_filter, set_price)],
-            AREA: [MessageHandler(text_filter, set_area)],
-            ROOMS: [MessageHandler(text_filter, set_rooms)],
-            OWNER_NAME: [MessageHandler(text_filter, set_owner_name)],
-            OWNER_PHONE: [MessageHandler(text_filter, set_owner_phone)],
-        },
-        fallbacks=[CommandHandler("cancel", cancel)],
-    )
-
-    # محادثة إضافة عميل
-    client_conv = ConversationHandler(
-        entry_points=[CommandHandler("add_client", add_client_start)],
-        states={
-            CLIENT_NAME: [MessageHandler(text_filter, set_client_name)],
-            CLIENT_PHONE: [MessageHandler(text_filter, set_client_phone)],
-            CLIENT_AREA: [MessageHandler(text_filter, set_client_area)],
-            CLIENT_PRICE: [MessageHandler(text_filter, set_client_price)],
-            CLIENT_ROOMS: [MessageHandler(text_filter, set_client_rooms)],
-        },
-        fallbacks=[CommandHandler("cancel", cancel)],
-    )
-
-    # تسجيل المحادثات والأوامر
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(prop_conv)
-    app.add_handler(client_conv)
-    
-    # ربط الأوامر العامة
-    app.add_handler(CommandHandler("list", list_properties))
-    app.add_handler(CommandHandler("available", available_properties))
-    app.add_handler(CommandHandler("clients", list_clients))
-    app.add_handler(CommandHandler("search", search_properties))
-    app.add_handler(CommandHandler("matches", smart_matches))
-    app.add_handler(CommandHandler("caption", generate_caption))
+    app.add_handler(CommandHandler("backup", backup_command))
+    app.add_handler(CallbackQueryHandler(button_handler))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_quick_input))
 
-    print("⚡ البوت جاهز ويعمل بكفاءة عالية...")
+    print("⚡ البوت السريع الذكي يعمل بأمان تام...")
     app.run_polling()
 
 if __name__ == "__main__":
