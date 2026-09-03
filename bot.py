@@ -14,9 +14,16 @@ from telegram.ext import (
     filters,
 )
 import openpyxl
+
+# استيراد مكتبات ReportLab وتشكيل النص العربي
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+import arabic_reshaper
+from bidi.algorithm import get_display
 
+# إعداد التسجيل للخطأ والتحذيرات
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
@@ -25,6 +32,13 @@ ADMIN_ID = os.environ.get("ADMIN_ID")
 DEFAULT_COMMISSION_RATE = 2.5  # نسبة العمولة الافتراضية التلقائية 2.5%
 
 TYPE, PRICE, OWNER_NAME, OWNER_PHONE = range(4)
+
+# دالة لمُعالجة وترتيب النص العربي لـ ReportLab
+def ar_text(text: str) -> str:
+    if not text:
+        return ""
+    reshaped_text = arabic_reshaper.reshape(str(text))
+    return get_display(reshaped_text)
 
 def init_db():
     conn = sqlite3.connect("real_estate.db")
@@ -108,7 +122,7 @@ async def type_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     context.user_data["type"] = query.data
-    await query.edit_message_text(f"النوع: <b>{query.data}</b>\n\nأدخل **السعر الكلي** (أرقام فقط):", parse_mode="HTML")
+    await query.edit_message_text(f"النوع: <b>{query.data}</b>\n\nأدخل <b>السعر الكلي</b> (أرقام فقط):", parse_mode="HTML")
     return PRICE
 
 async def set_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -123,7 +137,7 @@ async def set_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"💰 السعر: <b>{price:,.2f}</b>\n"
             f"⚡ صافي العمولة التلقائية (2.5%): <b>{comm_amount:,.2f}</b>\n\n"
-            f"أدخل **اسم المالك**:",
+            f"أدخل <b>اسم المالك</b>:",
             parse_mode="HTML"
         )
         return OWNER_NAME
@@ -133,7 +147,7 @@ async def set_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def set_owner_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["owner_name"] = update.message.text.strip()
-    await update.message.reply_text("أدخل **رقم هاتف المالك**:")
+    await update.message.reply_text("أدخل <b>رقم هاتف المالك</b>:", parse_mode="HTML")
     return OWNER_PHONE
 
 async def set_owner_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -160,7 +174,8 @@ async def set_owner_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_document(
         document=excel_file,
         filename=f"تحديث_آلي_العمولات_{datetime.now().strftime('%Y%m%d')}.xlsx",
-        caption="📊 **تحديث آلي:** تم تحديث سجل Excel بالبيانات الجديدة تلقائياً."
+        caption="📊 <b>تحديث آلي:</b> تم تحديث سجل Excel بالبيانات الجديدة تلقائياً.",
+        parse_mode="HTML"
     )
     context.user_data.clear()
     return ConversationHandler.END
@@ -175,7 +190,7 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn = sqlite3.connect("real_estate.db")
     cursor = conn.cursor()
     cursor.execute("SELECT COUNT(*) FROM properties")
-    total_count = cursor.fetchone()[0]
+    total_count = cursor.fetchone()[0] or 0
     cursor.execute("SELECT SUM(commission_amount) FROM properties WHERE status IN ('تم البيع', 'تم الإيجار')")
     earned = cursor.fetchone()[0] or 0.0
     cursor.execute("SELECT SUM(commission_amount) FROM properties WHERE status = 'متاح'")
@@ -246,14 +261,17 @@ async def export_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     buffer = BytesIO()
     p = canvas.Canvas(buffer, pagesize=letter)
+    
+    # استخدام خط يدعم العربية (مثلاً Arial أو استخدم Helvetica للإنجليزية وar_text للعربية)
     p.setFont("Helvetica-Bold", 18)
     p.drawString(180, 720, "REAL ESTATE PROPERTY BROCHURE")
     p.line(50, 700, 550, 700)
+    
     p.setFont("Helvetica", 12)
     p.drawString(50, 650, f"Property ID: #{row[0]}")
-    p.drawString(50, 620, f"Offer Type: {row[1]}")
+    p.drawString(50, 620, f"Offer Type: {ar_text(row[1])}")
     p.drawString(50, 590, f"Price: {row[2]:,.2f}")
-    p.drawString(50, 560, f"Status: {row[3]}")
+    p.drawString(50, 560, f"Status: {ar_text(row[3])}")
     p.line(50, 530, 550, 530)
     p.showPage()
     p.save()
@@ -286,6 +304,7 @@ def main():
     init_db()
     bot_token = os.environ.get("BOT_TOKEN")
     if not bot_token:
+        print("⚠️ خطأ: لم يتم العثور على BOT_TOKEN في متغيرات البيئة!")
         return
 
     app = Application.builder().token(bot_token).build()
@@ -309,6 +328,7 @@ def main():
     app.add_handler(CommandHandler("auto_excel", auto_excel))
     app.add_handler(CommandHandler("pdf", export_pdf))
 
+    print("⚡ البوت يعمل الآن...")
     app.run_polling()
 
 if __name__ == "__main__":
