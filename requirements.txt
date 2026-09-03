@@ -1,5 +1,2 @@
 python-telegram-bot
-openpyxl
-reportlab
-arabic-reshaper
-python-bidi
+requests
