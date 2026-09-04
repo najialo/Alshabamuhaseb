@@ -48,15 +48,26 @@ def init_db():
     conn.commit()
     conn.close()
 
-# --- 2. محرك تصنيف ذكي وشامل ---
+# --- 2. جلب أسعار العملات المباشرة ---
+def get_live_rates():
+    try:
+        url = "https://open.er-api.com/v6/latest/TRY"
+        req = urllib.request.urlopen(url, timeout=5)
+        data = json.loads(req.read().decode())
+        rates = data.get("rates", {})
+        return rates.get("USD", 0), rates.get("EUR", 0)
+    except Exception:
+        return None, None
+
+# --- 3. تصنيف النصوص ---
 def detect_category(text: str) -> str:
     text = text.lower()
     categories = {
-        "🛒 سوبرماركت وأغذية": ["حليب", "أكلات", "بيم", "bim", "شوك", "şok", "A101", "a101", "جبنة", "بيض", "لبن", "خبز", "ماركت", "خضار", "فواكه", "لحم", "دجاج", "مياه", "زيت"],
+        "🛒 سوبرماركت وأغذية": ["حليب", "أكلات", "بيم", "bim", "شوك", "şok", "a101", "جبنة", "بيض", "لبن", "خبز", "ماركت", "خضار", "فواكه", "لحم", "دجاج", "مياه", "زيت"],
         "🍔 مطاعم وكافيهات": ["غداء", "عشاء", "فطور", "مطعم", "قهوة", "كافيه", "شاورما", "بيتزا", "برغر", "دونر", "تنتوني", "كباب", "حلويات"],
         "🚗 مواصلات وتكاسي": ["بنزين", "تاكسي", "تكسي", "مواقف", "كارت", "كرت", "مترو", "باص", "تصليح", "مغسلة", "دولموش"],
         "🧾 فواتير واشتراكات": ["كهرباء", "ماء", "نت", "أنترنت", "اشتراك", "رصيد", "هاتف", "غاز", "إيجار", "ايجار", "فاتورة"],
-        "🛍️ تسوق وملابس": ["قميص", "بنطال", "شوز", "حذاء", "ملابس", "ساعة", "عطر", "ترينديول", "زارا", "lcw", "ل سي"],
+        "🛍️ تسوق وملابس": ["قميص", "بنطال", "شوز", "حذاء", "ملابس", "ساعة", "عطر", "ترينديول", "زارا", "lcw"],
         "💊 صحة وعناية": ["صيدلية", "دواء", "دكتور", "مستشفى", "تحليل", "علاج", "حلاق", "شامبو"]
     }
     for cat, keywords in categories.items():
@@ -64,7 +75,7 @@ def detect_category(text: str) -> str:
             return cat
     return "📦 مصاريف عامة"
 
-# --- 3. تسجيل المصروف واختيار طريقة الدفع ---
+# --- 4. معالجة التسجيل وتحديد طريقة الدفع ---
 async def process_expense_entry(text: str, update: Update, context: ContextTypes.DEFAULT_TYPE):
     numbers = re.findall(r'\d+(?:\.\d+)?', text.replace(',', ''))
     if not numbers:
@@ -73,14 +84,12 @@ async def process_expense_entry(text: str, update: Update, context: ContextTypes
 
     amount_try = float(numbers[0])
     
-    # تحديد المكان
     location = "غير محدد"
     if "من" in text:
         loc_match = re.search(r'من\s+([^\s]+(?:\s+[^\s]+)?)', text)
         if loc_match:
             location = loc_match.group(1).strip()
     else:
-        # التعرّف على المحلات المشهورة كأمكنة تلقائية
         for place in ["البيم", "بيم", "شوك", "a101", "A101", "ترينديول"]:
             if place in text.lower():
                 location = place
@@ -129,7 +138,7 @@ async def process_expense_entry(text: str, update: Update, context: ContextTypes
         parse_mode="Markdown"
     )
 
-# --- 4. معالجة الأزرار التفاعلية ---
+# --- 5. الأزرار التفاعلية ---
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -157,12 +166,62 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await query.edit_message_text(f"✅ **تم اعتماد طريقة الدفع:** {method}", parse_mode="Markdown")
 
-# --- 5. التقرير المالي الشامل المطور ---
+# --- 6. أوامر تحويل العملات /usd و /eur ---
+async def convert_to_usd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    usd_rate, _ = get_live_rates()
+    if not usd_rate:
+        await update.message.reply_text("❌ تعذر جلب أسعار الصرف المباشرة حالياً، حاول لاحقاً.")
+        return
+
+    current_month = datetime.now().strftime("%Y-%m")
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("SELECT SUM(amount_try) FROM expenses WHERE created_at LIKE ?", (f"{current_month}%",))
+    total_try = cursor.fetchone()[0] or 0.0
+    conn.close()
+
+    total_usd = total_try * usd_rate
+    try_per_usd = 1 / usd_rate if usd_rate > 0 else 0
+
+    await update.message.reply_text(
+        f"💵 **تحويل الإنفاق إلى الدولار الأمريكي (USD):**\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"🔹 **إجمالي المصاريف:** `{total_try:,.2f} TL`\n"
+        f"💲 **ما يعادله بالدولار:** `{total_usd:,.2f} $`\n"
+        f"📈 **سعر الصرف اللحظي:** `1$ = {try_per_usd:.2f} TL`",
+        parse_mode="Markdown"
+    )
+
+async def convert_to_eur(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    _, eur_rate = get_live_rates()
+    if not eur_rate:
+        await update.message.reply_text("❌ تعذر جلب أسعار الصرف المباشرة حالياً، حاول لاحقاً.")
+        return
+
+    current_month = datetime.now().strftime("%Y-%m")
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("SELECT SUM(amount_try) FROM expenses WHERE created_at LIKE ?", (f"{current_month}%",))
+    total_try = cursor.fetchone()[0] or 0.0
+    conn.close()
+
+    total_eur = total_try * eur_rate
+    try_per_eur = 1 / eur_rate if eur_rate > 0 else 0
+
+    await update.message.reply_text(
+        f"💶 **تحويل الإنفاق إلى اليورو (EUR):**\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"🔹 **إجمالي المصاريف:** `{total_try:,.2f} TL`\n"
+        f"💶 **ما يعادله باليورو:** `{total_eur:,.2f} €`\n"
+        f"📈 **سعر الصرف اللحظي:** `1€ = {try_per_eur:.2f} TL`",
+        parse_mode="Markdown"
+    )
+
+# --- 7. التقرير المالي الشامل ---
 async def detailed_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
     now = datetime.now()
     current_month = now.strftime("%Y-%m")
     
-    # تحديد تواريخ الأسبوع الحالي والأسبوع الماضي
     start_this_week = (now - timedelta(days=now.weekday())).strftime("%Y-%m-%d")
     start_last_week = (now - timedelta(days=now.weekday() + 7)).strftime("%Y-%m-%d")
     end_last_week = (now - timedelta(days=now.weekday() + 1)).strftime("%Y-%m-%d")
@@ -170,7 +229,6 @@ async def detailed_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     
-    # 1. تفصيل حسب الفئات
     cursor.execute("""
         SELECT category, SUM(amount_try), COUNT(*) 
         FROM expenses 
@@ -180,15 +238,12 @@ async def detailed_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """, (f"{current_month}%",))
     category_summary = cursor.fetchall()
     
-    # 2. الإجمالي الكلي للشهر
     cursor.execute("SELECT SUM(amount_try) FROM expenses WHERE created_at LIKE ?", (f"{current_month}%",))
     total_month = cursor.fetchone()[0] or 0.0
 
-    # 3. حساب الأسبوع الحالي
     cursor.execute("SELECT SUM(amount_try) FROM expenses WHERE date(created_at) >= ?", (start_this_week,))
     total_this_week = cursor.fetchone()[0] or 0.0
 
-    # 4. حساب الأسبوع الماضي
     cursor.execute("SELECT SUM(amount_try) FROM expenses WHERE date(created_at) BETWEEN ? AND ?", (start_last_week, end_last_week))
     total_last_week = cursor.fetchone()[0] or 0.0
 
@@ -198,12 +253,10 @@ async def detailed_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("📭 لا يوجد مصاريف مسجلة لهذا الشهر حتى الآن.")
         return
 
-    # صياغة التقرير والتحليلات
     top_category = category_summary[0][0]
     top_amount = category_summary[0][1]
     top_pct = (top_amount / total_month) * 100 if total_month > 0 else 0
 
-    # حساب فرق الأسابيع
     week_diff = total_this_week - total_last_week
     if week_diff > 0:
         week_analysis = f"📈 **ارتفع إنفاقك هذا الأسبوع** بمقدار `{week_diff:,.2f} TL` عن الأسبوع الماضي."
@@ -212,7 +265,6 @@ async def detailed_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         week_analysis = "⚖️ **إنفاقك هذا الأسبوع مساوٍ تماماً** للإنفاق في الأسبوع الماضي."
 
-    # توليد نصيحة للترشيد بناءً على أعلى فئة
     if "سوبرماركت" in top_category or "مطاعم" in top_category:
         tip = "💡 **نصيحة مالية:** أعلى إنفاق لديك على الطعام والمواد الغذائية. يفضل تحضير قائمة قبل الشراء لتقليل الشراء العشوائي."
     elif "مواصلات" in top_category:
@@ -246,7 +298,29 @@ async def detailed_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(msg, parse_mode="HTML")
 
-# --- 6. باقي الأوامر والتشغيل ---
+# --- 8. خيار مسح المصاريف الأخيرة ---
+async def show_recent_expenses(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, item, amount_try, created_at FROM expenses ORDER BY id DESC LIMIT 5")
+    rows = cursor.fetchall()
+    conn.close()
+
+    if not rows:
+        await update.message.reply_text("📭 لا يوجد مصاريف مسجلة مؤخراً.")
+        return
+
+    await update.message.reply_text("<b>📋 آخر المصاريف المسجلة (اضغط لمسح أي منها):</b>", parse_mode="HTML")
+    for r in rows:
+        keyboard = [[InlineKeyboardButton(f"❌ مسح ({r[1]})", callback_data=f"del_{r[0]}")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text(
+            f"🆔 **{r[0]}** | 🛒 {r[1]} | {r[2]:,.2f} TL\n🕒 {r[3]}",
+            reply_markup=reply_markup,
+            parse_mode="Markdown"
+        )
+
+# --- 9. أمر البدء التشغيلي ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (
         "<b>💎 المساعد المالي الشخصي الفائق</b>\n\n"
@@ -259,6 +333,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(msg, parse_mode="HTML")
 
+# --- 10. التشغيل والربط الكامل ---
 def main():
     init_db()
     if not BOT_TOKEN or BOT_TOKEN == "ضع_توكن_البوت_هنا":
@@ -267,12 +342,17 @@ def main():
 
     app = Application.builder().token(BOT_TOKEN).build()
 
+    # ربط جميع الأوامر لضمان الاستجابة السريعة
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("report", detailed_report))
+    app.add_handler(CommandHandler("usd", convert_to_usd))
+    app.add_handler(CommandHandler("eur", convert_to_eur))
+    app.add_handler(CommandHandler("recent", show_recent_expenses))
+    
     app.add_handler(CallbackQueryHandler(handle_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, lambda u, c: process_expense_entry(u.message.text, u, c)))
 
-    print("⚡ البوت المالي المطور جاهز...")
+    print("⚡ البوت المالي جاهز ويعمل...")
     app.run_polling()
 
 if __name__ == "__main__":
