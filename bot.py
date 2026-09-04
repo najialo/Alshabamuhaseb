@@ -173,7 +173,7 @@ def detect_category(text):
 
         "🛒 تسوق": [
             "سوبرماركت", "ماركت", "بقالة", "ملابس",
-            "حذاء", "شراء", "تسوق", "trendyol"
+            "حذاء", "شراء", "تسوق", "trendyol", "بيم", "bim"
         ],
 
         "🚗 مواصلات": [
@@ -386,8 +386,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("📋 آخر العمليات", callback_data="recent"),
         ],
         [
-            InlineKeyboardButton("💵 الدولار", callback_data="usd"),
-            InlineKeyboardButton("💶 اليورو", callback_data="eur"),
+            InlineKeyboardButton("💵 سعر الدولار", callback_data="usd"),
+            InlineKeyboardButton("💶 سعر اليورو", callback_data="eur"),
         ],
         [
             InlineKeyboardButton("📈 إحصائيات", callback_data="stats"),
@@ -576,6 +576,18 @@ async def process_transaction_text(
         ],
     ]
 
+    # حساب قيمة المبلغ بالدولار واليورو بناءً على سعر الصرف
+    usd_rate, eur_rate = get_live_rates()
+    conversion_info = ""
+
+    if usd_rate and usd_rate > 0:
+        amount_usd = amount * usd_rate
+        conversion_info += f"🇺🇸 المقابل بالدولار: *${amount_usd:,.2f}*\n"
+
+    if eur_rate and eur_rate > 0:
+        amount_eur = amount * eur_rate
+        conversion_info += f"🇪🇺 المقابل باليورو: *€{amount_eur:,.2f}*\n"
+
     await update.message.reply_text(
         f"""
 {title}
@@ -584,7 +596,7 @@ async def process_transaction_text(
 
 💰 المبلغ:
 *{format_money(amount)} TL*
-
+{conversion_info}
 📝 البيان:
 {item}
 
@@ -685,13 +697,11 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 """
 
     if usd and usd > 0:
-        usd_rate = 1 / usd
-        balance_usd = balance / usd_rate
+        balance_usd = balance * usd
         text += f"\n🇺🇸 بالدولار: *${balance_usd:,.2f}*"
 
     if eur and eur > 0:
-        eur_rate = 1 / eur
-        balance_eur = balance / eur_rate
+        balance_eur = balance * eur
         text += f"\n🇪🇺 باليورو: *€{balance_eur:,.2f}*"
 
     message_target = update.message if update.message else update.callback_query.message
