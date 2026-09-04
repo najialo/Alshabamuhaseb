@@ -23,9 +23,8 @@ from telegram.ext import (
     filters,
 )
 
-
 # =========================================================
-# إعدادات السيرفر الوهمي (Render Port Binding)
+# سيرفر الويب الوهمي لإرضاء Render (Port Binding)
 # =========================================================
 
 def run_dummy_server():
@@ -34,43 +33,42 @@ def run_dummy_server():
         def do_GET(self):
             self.send_response(200)
             self.end_headers()
-            self.wfile.write(b"Bot is alive!")
+            self.wfile.write(b"Bot is alive and running!")
     
     server = HTTPServer(('0.0.0.0', port), DummyHandler)
     server.serve_forever()
 
-
 # =========================================================
-# إعدادات البوت والقاعدة
+# الإعدادات العامة
 # =========================================================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-
 DB_NAME = "finance_pro.db"
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
 )
-
 logger = logging.getLogger(__name__)
 
 RATES_CACHE = {
-    "rates": None,
+    "TRY_TO_USD": None,
+    "TRY_TO_EUR": None,
     "last_fetched": None
 }
 
+# =========================================================
+# قاعدة البيانات
+# =========================================================
 
 def get_db():
     conn = sqlite3.connect(DB_NAME)
     conn.row_factory = sqlite3.Row
     return conn
 
-
 def init_db():
     conn = get_db()
     cur = conn.cursor()
-
     cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
@@ -80,7 +78,6 @@ def init_db():
             created_at TEXT
         )
     """)
-
     cur.execute("""
         CREATE TABLE IF NOT EXISTS transactions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -95,83 +92,62 @@ def init_db():
             created_at TEXT NOT NULL
         )
     """)
-
     conn.commit()
     conn.close()
-
 
 def register_user(user):
     conn = get_db()
-
     conn.execute("""
-        INSERT OR IGNORE INTO users
-        (user_id, first_name, username, created_at)
+        INSERT OR IGNORE INTO users (user_id, first_name, username, created_at)
         VALUES (?, ?, ?, ?)
-    """, (
-        user.id,
-        user.first_name or "",
-        user.username or "",
-        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-    ))
-
+    """, (user.id, user.first_name or "", user.username or "", datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
     conn.execute("""
-        UPDATE users
-        SET first_name = ?, username = ?
-        WHERE user_id = ?
-    """, (
-        user.first_name or "",
-        user.username or "",
-        user.id,
-    ))
-
+        UPDATE users SET first_name = ?, username = ? WHERE user_id = ?
+    """, (user.first_name or "", user.username or "", user.id))
     conn.commit()
     conn.close()
 
+# =========================================================
+# جلب أسعار العملات (مصحح ومضمون)
+# =========================================================
 
 def get_live_rates():
     now = datetime.now()
     if (RATES_CACHE["last_fetched"] and 
-            now - RATES_CACHE["last_fetched"] < timedelta(minutes=10) and 
-            RATES_CACHE["rates"]):
-        usd = RATES_CACHE["rates"].get("USD")
-        eur = RATES_CACHE["rates"].get("EUR")
-        return usd, eur
+            now - RATES_CACHE["last_fetched"] < timedelta(minutes=15) and 
+            RATES_CACHE["TRY_TO_USD"] is not None):
+        return RATES_CACHE["TRY_TO_USD"], RATES_CACHE["TRY_TO_EUR"]
 
     try:
+        # استخدام مصدر بديل ومستقر لأسعار الصرف
         url = "https://open.er-api.com/v6/latest/TRY"
-        response = requests.get(url, timeout=10)
-        response.raise_for_status()
-        data = response.json()
-
-        if data.get("result") != "success":
-            return None, None
-
-        rates = data.get("rates", {})
-        RATES_CACHE["rates"] = rates
-        RATES_CACHE["last_fetched"] = now
-
-        usd = rates.get("USD")
-        eur = rates.get("EUR")
-
-        return usd, eur
-
+        response = requests.get(url, timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            if data.get("result") == "success":
+                rates = data.get("rates", {})
+                usd = rates.get("USD") # كم تساوي 1 ليرة بالدولار
+                eur = rates.get("EUR") # كم تساوي 1 ليرة باليورو
+                if usd and eur:
+                    RATES_CACHE["TRY_TO_USD"] = usd
+                    RATES_CACHE["TRY_TO_EUR"] = eur
+                    RATES_CACHE["last_fetched"] = now
+                    return usd, eur
     except Exception as e:
-        logger.warning("Currency API error: %s", e)
-        if RATES_CACHE["rates"]:
-            return RATES_CACHE["rates"].get("USD"), RATES_CACHE["rates"].get("EUR")
-        return None, None
+        logger.warning("API Error: %s", e)
 
+    # قيم احتياطية في حال تعذر الاتصال مؤقتاً لمنع توقف البوت
+    return RATES_CACHE.get("TRY_TO_USD") or 0.03, RATES_CACHE.get("TRY_TO_EUR") or 0.028
 
 def format_money(value):
     return f"{value:,.2f}"
-
 
 def detect_category(text):
     t = text.lower()
     categories = {
         "🍔 طعام": ["مطعم", "اكل", "أكل", "غداء", "عشاء", "فطور", "برغر", "burger", "pizza", "بيتزا", "دجاج", "شاورما", "مقهى", "قهوة", "كافيه"],
         "🛒 تسوق": ["سوبرماركت", "ماركت", "بقالة", "ملابس", "حذاء", "شراء", "تسوق", "trendyol", "بيم", "bim"],
-        "🚗 مواصلات": ["بنزين", "مازوت", "ديزل", "تكسي", "تاكسي", "باص", "مترو", "مواصلات", "سيارة", "غسيل سيارة"],
+        "🚗 مواصلات": ["بنزين", "مازوت", "ديزل", "تكسي", "تاكسي", "باص", "مترو", "مواصلات", "سيارة"],
         "🏠 منزل": ["بيت", "منزل", "ايجار", "إيجار", "كهرباء", "ماء", "غاز", "صيانة"],
         "📱 اتصالات": ["ترك", "turkcell", "vodafone", "انترنت", "نت", "هاتف", "شحن"],
         "💊 صحة": ["صيدلية", "دواء", "دكتور", "طبيب", "مشفى", "مستشفى", "علاج"],
@@ -180,10 +156,9 @@ def detect_category(text):
     }
     for category, words in categories.items():
         for word in words:
-            if word.lower() in t:
+            if word in t:
                 return category
     return "📦 أخرى"
-
 
 def extract_amount(text):
     pattern = r"(?<!\w)(\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)(?!\w)"
@@ -210,100 +185,22 @@ def extract_amount(text):
     except Exception:
         return None
 
-
 def clean_text(text):
     text = re.sub(r"(?<!\w)(\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)(?!\w)", "", text, count=1)
     text = re.sub(r"(ليرة|ليرات|tl|try|₺|دولار|دولارات|usd|eur|يورو)", "", text, flags=re.IGNORECASE)
     return " ".join(text.split()).strip()
 
-
-def add_transaction(user_id, transaction_type, item, amount, payment_method="💵 كاش", location="", note=""):
+def add_transaction(user_id, transaction_type, item, amount, payment_method="💵 كاش"):
     category = detect_category(item)
     conn = get_db()
     cur = conn.execute("""
-        INSERT INTO transactions (user_id, type, item, category, amount_try, payment_method, location, note, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (user_id, transaction_type, item, category, amount, payment_method, location, note, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+        INSERT INTO transactions (user_id, type, item, category, amount_try, payment_method, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, (user_id, transaction_type, item, category, amount, payment_method, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
     transaction_id = cur.lastrowid
     conn.commit()
     conn.close()
     return transaction_id, category
-
-
-def get_report(user_id):
-    conn = get_db()
-    row = conn.execute("""
-        SELECT
-            COALESCE(SUM(CASE WHEN type = 'income' THEN amount_try ELSE 0 END), 0) AS income,
-            COALESCE(SUM(CASE WHEN type = 'expense' THEN amount_try ELSE 0 END), 0) AS expense
-        FROM transactions WHERE user_id = ?
-    """, (user_id,)).fetchone()
-    conn.close()
-    return row["income"], row["expense"], row["income"] - row["expense"]
-
-
-def get_category_stats(user_id):
-    conn = get_db()
-    rows = conn.execute("""
-        SELECT category, SUM(amount_try) AS total FROM transactions
-        WHERE user_id = ? AND type = 'expense'
-        GROUP BY category ORDER BY total DESC
-    """, (user_id,)).fetchall()
-    conn.close()
-    return rows
-
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    register_user(update.effective_user)
-    keyboard = [
-        [InlineKeyboardButton("💸 مصروف", callback_data="add_expense"), InlineKeyboardButton("💰 دخل", callback_data="add_income")],
-        [InlineKeyboardButton("📊 التقرير", callback_data="report"), InlineKeyboardButton("📋 آخر العمليات", callback_data="recent")],
-        [InlineKeyboardButton("💵 سعر الدولار", callback_data="usd"), InlineKeyboardButton("💶 سعر اليورو", callback_data="eur")],
-        [InlineKeyboardButton("📈 إحصائيات", callback_data="stats"), InlineKeyboardButton("📥 Excel", callback_data="excel")],
-        [InlineKeyboardButton("⚙️ الميزانية", callback_data="budget"), InlineKeyboardButton("❓ المساعدة", callback_data="help")],
-    ]
-    text = """
-🧠 *مساعدك المالي PRO*
-أهلاً بك 👋
-يمكنك إدارة مصاريفك ودخلك بالكامل من داخل البوت.
-"""
-    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
-
-
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = "📚 *شرح البوت*\nاكتب المصروف أو الدخل مباشرة، أو استخدم الأزرار."
-    await update.message.reply_text(text, parse_mode="Markdown")
-
-
-async def process_transaction_text(update, transaction_type, text):
-    user_id = update.effective_user.id
-    amount = extract_amount(text)
-    if amount is None or amount <= 0:
-        await update.message.reply_text("❌ لم أستطع معرفة المبلغ.\nمثال:\n`مصروف 250 مطعم`", parse_mode="Markdown")
-        return
-
-    item = clean_text(text) or "عملية مالية"
-    transaction_id, category = add_transaction(user_id, transaction_type, item, amount)
-    title = "💸 تم تسجيل المصروف" if transaction_type == "expense" else "💰 تم تسجيل الدخل"
-    
-    keyboard = [
-        [InlineKeyboardButton("💵 كاش", callback_data=f"cash_{transaction_id}"), InlineKeyboardButton("💳 بطاقة", callback_data=f"card_{transaction_id}")],
-        [InlineKeyboardButton("❌ حذف هذه العملية", callback_data=f"delete_{transaction_id}")],
-    ]
-    
-    usd_rate, eur_rate = get_live_rates()
-    conversion_info = ""
-    if usd_rate and usd_rate > 0:
-        conversion_info += f"🇺🇸 المقابل بالدولار: *${amount * usd_rate:,.2f}*\n"
-    if eur_rate and eur_rate > 0:
-        conversion_info += f"🇪🇺 المقابل باليورو: *€{amount * eur_rate:,.2f}*\n"
-
-    await update.message.reply_text(
-        f"{title}\n\n💰 المبلغ:\n*{format_money(amount)} TL*\n{conversion_info}\n📝 البيان:\n{item}\n🏷 التصنيف:\n{category}\n🆔 رقم العملية:\n`{transaction_id}`",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
 
 def delete_transaction_by_id(transaction_id, user_id):
     conn = get_db()
@@ -317,30 +214,80 @@ def delete_transaction_by_id(transaction_id, user_id):
     conn.close()
     return True
 
+# =========================================================
+# الأوامر والواجهات
+# =========================================================
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    register_user(update.effective_user)
+    keyboard = [
+        [InlineKeyboardButton("💸 مصروف", callback_data="add_expense"), InlineKeyboardButton("💰 دخل", callback_data="add_income")],
+        [InlineKeyboardButton("📊 التقرير", callback_data="report"), InlineKeyboardButton("📋 آخر العمليات", callback_data="recent")],
+        [InlineKeyboardButton("💵 سعر الدولار", callback_data="usd"), InlineKeyboardButton("💶 سعر اليورو", callback_data="eur")],
+        [InlineKeyboardButton("📈 إحصائيات", callback_data="stats"), InlineKeyboardButton("📥 Excel", callback_data="excel")],
+        [InlineKeyboardButton("⚙️ الميزانية", callback_data="budget"), InlineKeyboardButton("❓ المساعدة", callback_data="help")],
+    ]
+    text = "🧠 *مساعدك المالي PRO*\n\nأهلاً بك 👋\nأدخل مصاريفك أو دخلك مباشرة (مثال: `مصروف 150 مطعم`)."
+    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = """
+📚 *طريقة الاستخدام:*
+• لإضافة مصروف: `مصروف 200 مطعم`
+• لإضافة دخل: `دخل 5000 راتب`
+• للحذف السريع: `حذف رقم_العملية` (مثال: `حذف 3`)
+• أو استخدم الأزرار التفاعلية أسفل رسالة /start.
+"""
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+async def process_transaction_text(update, transaction_type, text):
+    user_id = update.effective_user.id
+    amount = extract_amount(text)
+    if amount is None or amount <= 0:
+        await update.message.reply_text("❌ لم أستطع تحديد المبلغ بشكل صحيح.\nمثال: `مصروف 250 مطعم`", parse_mode="Markdown")
+        return
+
+    item = clean_text(text) or "عملية مالية"
+    transaction_id, category = add_transaction(user_id, transaction_type, item, amount)
+    title = "💸 تم تسجيل المصروف بنجاح" if transaction_type == "expense" else "💰 تم تسجيل الدخل بنجاح"
+    
+    keyboard = [
+        [InlineKeyboardButton("❌ حذف هذه العملية", callback_data=f"delete_{transaction_id}")]
+    ]
+    
+    # حساب الدولار واليورو تلقائياً
+    try_to_usd, try_to_eur = get_live_rates()
+    usd_val = amount * try_to_usd
+    eur_val = amount * try_to_eur
+
+    msg = (
+        f"{title}\n\n"
+        f"💰 المبلغ: *{format_money(amount)} TL*\n"
+        f"🇺🇸 بالدولار: *${usd_val:,.2f}*\n"
+        f"🇪🇺 باليورو: *€{eur_val:,.2f}*\n"
+        f"📝 البيان: {item}\n"
+        f"🏷 التصنيف: {category}\n"
+        f"🆔 رقم العملية: `{transaction_id}`"
+    )
+
+    await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     register_user(update.effective_user)
     text = update.message.text.strip()
     user_id = update.effective_user.id
 
+    # معالجة الحذف بالنص (مثل: حذف 5)
     if text.startswith("حذف "):
         parts = text.split()
         if len(parts) > 1 and parts[1].isdigit():
-            target_id = int(parts[1])
-            if delete_transaction_by_id(target_id, user_id):
-                await update.message.reply_text(f"🗑 تم حذف العملية رقم `{target_id}` بنجاح.", parse_mode="Markdown")
+            tid = int(parts[1])
+            if delete_transaction_by_id(tid, user_id):
+                await update.message.reply_text(f"🗑 تم حذف العملية رقم `{tid}` بنجاح.", parse_mode="Markdown")
             else:
                 await update.message.reply_text("❌ لم أجد عملية بهذا الرقم أو أنها لا تخصك.", parse_mode="Markdown")
-        return
-
-    if text.startswith("بحث "):
-        keyword = text[5:].strip()
-        if keyword:
-            conn = get_db()
-            rows = conn.execute("SELECT * FROM transactions WHERE user_id = ? AND (item LIKE ? OR category LIKE ?)", (user_id, f"%{keyword}%", f"%{keyword}%")).fetchall()
-            conn.close()
-            res_text = f"🔎 *نتائج البحث: {keyword}*\n\n" + "".join([f"💸 `{r['id']}` {r['item']} — *{format_money(r['amount_try'])} TL*\n" for r in rows]) if rows else f"🔎 لا توجد نتائج عن: {keyword}"
-            await update.message.reply_text(res_text, parse_mode="Markdown")
+        else:
+            await update.message.reply_text("❌ يرجى كتابة رقم العملية صحيحاً. مثال: `حذف 3`", parse_mode="Markdown")
         return
 
     if text.startswith("ميزانية"):
@@ -350,49 +297,93 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             conn.execute("UPDATE users SET monthly_budget = ? WHERE user_id = ?", (amount, user_id))
             conn.commit()
             conn.close()
-            await update.message.reply_text(f"⚙️ تم تحديد الميزانية:\n💰 *{format_money(amount)} TL*", parse_mode="Markdown")
+            await update.message.reply_text(f"⚙️ تم تحديد الميزانية الشهرية:\n💰 *{format_money(amount)} TL*", parse_mode="Markdown")
         return
 
     amount = extract_amount(text)
     if amount is None:
-        await update.message.reply_text("🤖 لم أفهم الأمر. مثال:\n`مصروف 200 مطعم`", parse_mode="Markdown")
+        await update.message.reply_text("🤖 لم أفهم هذا الأمر. اكتب المصروف مباشرة أو اضغط /start", parse_mode="Markdown")
         return
 
     is_income = any(w in text.lower() for w in ["دخل", "راتب", "راتبي", "قبضت", "استلمت", "ربح"])
     await process_transaction_text(update, "income" if is_income else "expense", text)
 
-
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    income, expense, balance = get_report(update.effective_user.id)
+    user_id = update.effective_user.id
+    conn = get_db()
+    row = conn.execute("""
+        SELECT
+            COALESCE(SUM(CASE WHEN type = 'income' THEN amount_try ELSE 0 END), 0) AS income,
+            COALESCE(SUM(CASE WHEN type = 'expense' THEN amount_try ELSE 0 END), 0) AS expense
+        FROM transactions WHERE user_id = ?
+    """, (user_id,)).fetchone()
+    conn.close()
+
+    income, expense = row["income"], row["expense"]
+    balance = income - expense
+    try_to_usd, try_to_eur = get_live_rates()
+
     target = update.message if update.message else update.callback_query.message
-    await target.reply_text(f"📊 *التقرير المالي*\n\n💰 الدخل: *{format_money(income)} TL*\n💸 المصروف: *{format_money(expense)} TL*\n💵 الرصيد: *{format_money(balance)} TL*", parse_mode="Markdown")
+    await target.reply_text(
+        f"📊 *التقرير المالي*\n\n"
+        f"💰 الدخل: *{format_money(income)} TL*\n"
+        f"💸 المصروف: *{format_money(expense)} TL*\n"
+        f"💵 الرصيد الصافي: *{format_money(balance)} TL*\n"
+        f"🇺🇸 بالدولار: *${balance * try_to_usd:,.2f}*\n"
+        f"🇪🇺 باليورو: *€{balance * try_to_eur:,.2f}*",
+        parse_mode="Markdown"
+    )
 
+async def recent_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    conn = get_db()
+    rows = conn.execute("SELECT * FROM transactions WHERE user_id = ? ORDER BY id DESC LIMIT 10", (user_id,)).fetchall()
+    conn.close()
 
-async def usd_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    usd, _ = get_live_rates()
-    if usd:
-        await update.message.reply_text(f"🇺🇸 1 USD ≈ *{1 / usd:,.2f} TL*", parse_mode="Markdown")
-    else:
-        await update.message.reply_text("❌ تعذر جلب السعر.")
-
-
-async def eur_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    _, eur = get_live_rates()
-    if eur:
-        await update.message.reply_text(f"🇪🇺 1 EUR ≈ *{1 / eur:,.2f} TL*", parse_mode="Markdown")
-    else:
-        await update.message.reply_text("❌ تعذر جلب السعر.")
-
-
-async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    rows = get_category_stats(update.effective_user.id)
     if not rows:
-        await update.message.reply_text("📊 لا توجد مصاريف حتى الآن.")
+        await update.message.reply_text("📭 لا توجد عمليات مسجلة حتى الآن.")
         return
-    total = sum(r["total"] for r in rows)
-    text = "📈 *إحصائيات المصاريف*\n\n" + "".join([f"{r['category']}\n💰 {format_money(r['total'])} TL ({(r['total']/total)*100:.1f}%)\n\n" for r in rows])
+
+    text = "📋 *آخر العمليات* (للحذف اكتب: `حذف رقم_العملية`)\n\n"
+    for r in rows:
+        emoji = "💸" if r["type"] == "expense" else "💰"
+        text += f"{emoji} `{r['id']}` | {r['item']} — *{format_money(r['amount_try'])} TL*\n"
+
     await update.message.reply_text(text, parse_mode="Markdown")
 
+async def usd_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try_to_usd, _ = get_live_rates()
+    if try_to_usd and try_to_usd > 0:
+        usd_rate = 1 / try_to_usd
+        await update.message.reply_text(f"🇺🇸 1 USD ≈ *{usd_rate:,.2f} TL*", parse_mode="Markdown")
+    else:
+        await update.message.reply_text("❌ تعذر جلب سعر الدولار حالياً.")
+
+async def eur_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    _, try_to_eur = get_live_rates()
+    if try_to_eur and try_to_eur > 0:
+        eur_rate = 1 / try_to_eur
+        await update.message.reply_text(f"🇪🇺 1 EUR ≈ *{eur_rate:,.2f} TL*", parse_mode="Markdown")
+    else:
+        await update.message.reply_text("❌ تعذر جلب سعر اليورو حالياً.")
+
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    conn = get_db()
+    rows = conn.execute("SELECT category, SUM(amount_try) AS total FROM transactions WHERE user_id = ? AND type = 'expense' GROUP BY category ORDER BY total DESC", (user_id,)).fetchall()
+    conn.close()
+
+    if not rows:
+        await update.message.reply_text("📊 لا توجد مصاريف لتصنيفها حتى الآن.")
+        return
+
+    total = sum(r["total"] for r in rows)
+    text = "📈 *إحصائيات المصاريف*\n\n"
+    for r in rows:
+        pct = (r["total"] / total * 100) if total > 0 else 0
+        text += f"{r['category']} : *{format_money(r['total'])} TL* ({pct:.1f}%)\n"
+
+    await update.message.reply_text(text, parse_mode="Markdown")
 
 async def excel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -403,18 +394,20 @@ async def excel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not rows:
         await target.reply_text("📭 لا توجد بيانات لتصديرها.")
         return
+
     wb = Workbook()
     ws = wb.active
-    ws.append(["ID", "Type", "Item", "Category", "Amount TRY", "Payment", "Location", "Note", "Date"])
+    ws.title = "Transactions"
+    ws.append(["ID", "Type", "Item", "Category", "Amount TRY", "Payment", "Date"])
     for r in rows:
-        ws.append([r["id"], r["type"], r["item"], r["category"], r["amount_try"], r["payment_method"], r["location"], r["note"], r["created_at"]])
+        ws.append([r["id"], r["type"], r["item"], r["category"], r["amount_try"], r["payment_method"], r["created_at"]])
+
     filename = f"finance_{user_id}.xlsx"
     wb.save(filename)
     wb.close()
     with open(filename, "rb") as f:
-        await target.reply_document(document=f, filename=filename)
+        await target.reply_document(document=f, filename=filename, caption="📊 ملف Excel لعملياتك المالية")
     os.remove(filename)
-
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -424,28 +417,37 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "report":
         await report_command(update, context)
+    elif data == "recent":
+        await recent_command(update, context)
     elif data == "usd":
-        usd, _ = get_live_rates()
-        await query.message.reply_text(f"🇺🇸 1 USD ≈ *{1 / usd:,.2f} TL*" if usd else "❌ تعذر السعر", parse_mode="Markdown")
+        await usd_command(update, context)
     elif data == "eur":
-        _, eur = get_live_rates()
-        await query.message.reply_text(f"🇪🇺 1 EUR ≈ *{1 / eur:,.2f} TL*" if eur else "❌ تعذر السعر", parse_mode="Markdown")
+        await eur_command(update, context)
     elif data == "stats":
         await stats_command(update, context)
     elif data == "excel":
         await excel_command(update, context)
+    elif data == "budget":
+        await query.message.reply_text("⚙️ لتحديد الميزانية اكتب:\n`ميزانية 10000`", parse_mode="Markdown")
+    elif data == "help":
+        await help_command(update, context)
+    elif data == "add_expense":
+        await query.message.reply_text("💸 أرسل المصروف هكذا:\n`مصروف 150 مطعم`", parse_mode="Markdown")
+    elif data == "add_income":
+        await query.message.reply_text("💰 أرسل الدخل هكذا:\n`دخل 10000 راتب`", parse_mode="Markdown")
     elif data.startswith("delete_"):
         tid = int(data.split("_")[1])
         if delete_transaction_by_id(tid, user_id):
-            await query.message.reply_text(f"🗑 تم حذف العملية رقم `{tid}`", parse_Mode="Markdown")
-
+            await query.message.reply_text(f"🗑 تم حذف العملية رقم `{tid}` بنجاح.", parse_mode="Markdown")
+        else:
+            await query.message.reply_text("❌ لم يتم العثور على العملية أو أنها محذوفة مسبقاً.", parse_mode="Markdown")
 
 # =========================================================
-# التشغيل الأساسي (Main)
+# التشغيل الرئيسي
 # =========================================================
 
 def main():
-    # تشغيل السيرفر الوهمي في الخلفية لحل مشكلة بورتات Render
+    # تشغيل السيرفر الوهمي في الخلفية (إلزامي لـ Render)
     threading.Thread(target=run_dummy_server, daemon=True).start()
 
     init_db()
@@ -467,9 +469,8 @@ def main():
     application.add_handler(CallbackQueryHandler(callback_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
-    logger.info("Bot is starting...")
+    logger.info("Bot started successfully...")
     application.run_polling()
-
 
 if __name__ == "__main__":
     main()
