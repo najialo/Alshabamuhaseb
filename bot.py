@@ -2,7 +2,7 @@ import os
 import re
 import sqlite3
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import requests
 from openpyxl import Workbook
@@ -36,6 +36,12 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger(__name__)
+
+# تخزين مؤقت لأسعار العملات (Caching)
+RATES_CACHE = {
+    "rates": None,
+    "last_fetched": None
+}
 
 
 # =========================================================
@@ -110,26 +116,31 @@ def register_user(user):
 
 
 # =========================================================
-# العملات
+# العملات مع نظام Caching
 # =========================================================
 
 def get_live_rates():
+    now = datetime.now()
+    # التحقق من وجود كاش صالح (أقل من 10 دقائق)
+    if (RATES_CACHE["last_fetched"] and 
+            now - RATES_CACHE["last_fetched"] < timedelta(minutes=10) and 
+            RATES_CACHE["rates"]):
+        usd = RATES_CACHE["rates"].get("USD")
+        eur = RATES_CACHE["rates"].get("EUR")
+        return usd, eur
+
     try:
         url = "https://open.er-api.com/v6/latest/TRY"
-
-        response = requests.get(
-            url,
-            timeout=10
-        )
-
+        response = requests.get(url, timeout=10)
         response.raise_for_status()
-
         data = response.json()
 
         if data.get("result") != "success":
             return None, None
 
         rates = data.get("rates", {})
+        RATES_CACHE["rates"] = rates
+        RATES_CACHE["last_fetched"] = now
 
         usd = rates.get("USD")
         eur = rates.get("EUR")
@@ -138,6 +149,9 @@ def get_live_rates():
 
     except Exception as e:
         logger.warning("Currency API error: %s", e)
+        # في حال حدوث خطأ، يتم إرجاع الكاش القديم إن وجد
+        if RATES_CACHE["rates"]:
+            return RATES_CACHE["rates"].get("USD"), RATES_CACHE["rates"].get("EUR")
         return None, None
 
 
@@ -205,16 +219,7 @@ def detect_category(text):
 
 
 def extract_amount(text):
-    # يدعم:
-    # 100
-    # 100.50
-    # 1,500
-    # 1.500
-    # 100₺
-    # 100 ليرة
-
     pattern = r"(?<!\w)(\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)(?!\w)"
-
     match = re.search(pattern, text)
 
     if not match:
@@ -228,7 +233,6 @@ def extract_amount(text):
 
         elif "," in raw:
             parts = raw.split(",")
-
             if len(parts[-1]) == 2:
                 raw = raw.replace(",", ".")
             else:
@@ -236,7 +240,6 @@ def extract_amount(text):
 
         elif "." in raw:
             parts = raw.split(".")
-
             if len(parts) > 2:
                 raw = raw.replace(".", "")
             elif len(parts[-1]) == 3:
@@ -344,7 +347,6 @@ def get_report(user_id):
 
     income = row["income"]
     expense = row["expense"]
-
     balance = income - expense
 
     return income, expense, balance
@@ -417,7 +419,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 📥 تصدير Excel
 ⚙️ ميزانية شهرية
 🔎 بحث بالعمليات
-🗑 حذف العمليات
 
 ━━━━━━━━━━━━━━
 
@@ -613,10 +614,8 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if text.startswith("بحث "):
         keyword = text[5:].strip()
-
         if keyword:
             await search_transactions(update, keyword)
-
         return
 
     if text.startswith("ميزانية"):
@@ -936,7 +935,7 @@ async def budget_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     remaining = budget - expense
-    percentage = expense / budget * 100
+    percentage = (expense / budget * 100) if budget > 0 else 0
 
     if remaining >= 0:
         status = "🟢 ضمن الميزانية"
@@ -994,8 +993,10 @@ async def excel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     conn.close()
 
+    message_target = update.message if update.message else update.callback_query.message
+
     if not rows:
-        await update.message.reply_text(
+        await message_target.reply_text(
             "📭 لا توجد بيانات لتصديرها."
         )
         return
@@ -1051,18 +1052,21 @@ async def excel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     filename = f"finance_{user_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
 
     wb.save(filename)
-
-    with open(filename, "rb") as file:
-        await update.message.reply_document(
-            document=file,
-            filename=filename,
-            caption="📊 ملف Excel الخاص بحسابك"
-        )
+    wb.close()  # إغلاق الكراس لتحرير الملف من الذاكرة
 
     try:
-        os.remove(filename)
-    except Exception:
-        pass
+        with open(filename, "rb") as file:
+            await message_target.reply_document(
+                document=file,
+                filename=filename,
+                caption="📊 ملف Excel الخاص بحسابك"
+            )
+    finally:
+        if os.path.exists(filename):
+            try:
+                os.remove(filename)
+            except Exception as e:
+                logger.error("Failed to remove temp file: %s", e)
 
 
 # =========================================================
@@ -1078,7 +1082,6 @@ async def callback_handler(
     await query.answer()
 
     data = query.data
-
     user_id = query.from_user.id
 
     if data == "report":
@@ -1201,68 +1204,7 @@ async def callback_handler(
         )
 
     elif data == "excel":
-        # نفس منطق Excel
-        conn = get_db()
-
-        rows = conn.execute("""
-            SELECT *
-            FROM transactions
-            WHERE user_id = ?
-            ORDER BY id DESC
-        """, (user_id,)).fetchall()
-
-        conn.close()
-
-        if not rows:
-            await query.message.reply_text(
-                "📭 لا توجد بيانات."
-            )
-            return
-
-        wb = Workbook()
-        ws = wb.active
-        ws.title = "Finance"
-
-        ws.append([
-            "ID",
-            "Type",
-            "Item",
-            "Category",
-            "Amount TRY",
-            "Payment",
-            "Location",
-            "Note",
-            "Date",
-        ])
-
-        for row in rows:
-            ws.append([
-                row["id"],
-                row["type"],
-                row["item"],
-                row["category"],
-                row["amount_try"],
-                row["payment_method"],
-                row["location"],
-                row["note"],
-                row["created_at"],
-            ])
-
-        filename = f"finance_{user_id}.xlsx"
-
-        wb.save(filename)
-
-        with open(filename, "rb") as file:
-            await query.message.reply_document(
-                document=file,
-                filename=filename,
-                caption="📊 تقرير Excel"
-            )
-
-        try:
-            os.remove(filename)
-        except Exception:
-            pass
+        await excel_command(update, context)
 
     elif data == "budget":
         await query.message.reply_text(
@@ -1394,50 +1336,19 @@ def main():
     )
 
     # Commands
-    application.add_handler(
-        CommandHandler("start", start)
-    )
-
-    application.add_handler(
-        CommandHandler("help", help_command)
-    )
-
-    application.add_handler(
-        CommandHandler("report", report_command)
-    )
-
-    application.add_handler(
-        CommandHandler("recent", recent_command)
-    )
-
-    application.add_handler(
-        CommandHandler("usd", usd_command)
-    )
-
-    application.add_handler(
-        CommandHandler("eur", eur_command)
-    )
-
-    application.add_handler(
-        CommandHandler("stats", stats_command)
-    )
-
-    application.add_handler(
-        CommandHandler("budget", budget_command)
-    )
-
-    application.add_handler(
-        CommandHandler("excel", excel_command)
-    )
-
-    application.add_handler(
-        CommandHandler("menu", menu_command)
-    )
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("report", report_command))
+    application.add_handler(CommandHandler("recent", recent_command))
+    application.add_handler(CommandHandler("usd", usd_command))
+    application.add_handler(CommandHandler("eur", eur_command))
+    application.add_handler(CommandHandler("stats", stats_command))
+    application.add_handler(CommandHandler("budget", budget_command))
+    application.add_handler(CommandHandler("excel", excel_command))
+    application.add_handler(CommandHandler("menu", menu_command))
 
     # Buttons
-    application.add_handler(
-        CallbackQueryHandler(callback_handler)
-    )
+    application.add_handler(CallbackQueryHandler(callback_handler))
 
     # Text
     application.add_handler(
