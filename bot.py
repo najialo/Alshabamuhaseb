@@ -121,7 +121,6 @@ def register_user(user):
 
 def get_live_rates():
     now = datetime.now()
-    # التحقق من وجود كاش صالح (أقل من 10 دقائق)
     if (RATES_CACHE["last_fetched"] and 
             now - RATES_CACHE["last_fetched"] < timedelta(minutes=10) and 
             RATES_CACHE["rates"]):
@@ -149,7 +148,6 @@ def get_live_rates():
 
     except Exception as e:
         logger.warning("Currency API error: %s", e)
-        # في حال حدوث خطأ، يتم إرجاع الكاش القديم إن وجد
         if RATES_CACHE["rates"]:
             return RATES_CACHE["rates"].get("USD"), RATES_CACHE["rates"].get("EUR")
         return None, None
@@ -1052,7 +1050,7 @@ async def excel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     filename = f"finance_{user_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
 
     wb.save(filename)
-    wb.close()  # إغلاق الكراس لتحرير الملف من الذاكرة
+    wb.close()
 
     try:
         with open(filename, "rb") as file:
