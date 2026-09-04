@@ -417,6 +417,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 📥 تصدير Excel
 ⚙️ ميزانية شهرية
 🔎 بحث بالعمليات
+❌ حذف عملية (اكتب: حذف + رقم العملية)
 
 ━━━━━━━━━━━━━━
 
@@ -464,6 +465,13 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 مثال:
 `دخل 15000 راتب`
+
+━━━━━━━━━━━━━━
+
+❌ *حذف عملية*
+
+اكتب كلمة حذف مع رقم العملية، مثال:
+`حذف 3`
 
 ━━━━━━━━━━━━━━
 
@@ -574,6 +582,12 @@ async def process_transaction_text(
                 callback_data=f"card_{transaction_id}"
             ),
         ],
+        [
+            InlineKeyboardButton(
+                "❌ حذف هذه العملية",
+                callback_data=f"delete_{transaction_id}"
+            ),
+        ],
     ]
 
     # حساب قيمة المبلغ بالدولار واليورو بناءً على سعر الصرف
@@ -606,11 +620,40 @@ async def process_transaction_text(
 🆔 رقم العملية:
 `{transaction_id}`
 
-يمكنك تحديد طريقة الدفع:
+يمكنك تحديد طريقة الدفع أو الحذف:
 """,
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
+
+
+# =========================================================
+# وظيفة الحذف المركزية
+# =========================================================
+
+def delete_transaction_by_id(transaction_id, user_id):
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    # التأكد أن العملية تملكها نفس المستخدم الأمني
+    cursor.execute("""
+        SELECT id FROM transactions 
+        WHERE id = ? AND user_id = ?
+    """, (transaction_id, user_id))
+    
+    row = cursor.fetchone()
+    if not row:
+        conn.close()
+        return False
+        
+    cursor.execute("""
+        DELETE FROM transactions 
+        WHERE id = ? AND user_id = ?
+    """, (transaction_id, user_id))
+    
+    conn.commit()
+    conn.close()
+    return True
 
 
 # =========================================================
@@ -621,6 +664,30 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     register_user(update.effective_user)
 
     text = update.message.text.strip()
+    user_id = update.effective_user.id
+
+    # معالجة أمر الحذف النصي (مثل: حذف 3)
+    if text.startswith("حذف "):
+        parts = text.split()
+        if len(parts) > 1 and parts[1].isdigit():
+            target_id = int(parts[1])
+            success = delete_transaction_by_id(target_id, user_id)
+            if success:
+                await update.message.reply_text(
+                    f"🗑 تم حذف العملية رقم `{target_id}` بنجاح.",
+                    parse_mode="Markdown"
+                )
+            else:
+                await update.message.reply_text(
+                    f"❌ عذراً، لم أجد عملية بهذا الرقم أو أنها لا تخصك.",
+                    parse_mode="Markdown"
+                )
+        else:
+            await update.message.reply_text(
+                "❌ يرجى كتابة رقم العملية صحيحاً بعد كلمة حذف.\nمثال: `حذف 3`",
+                parse_mode="Markdown"
+            )
+        return
 
     if text.startswith("بحث "):
         keyword = text[5:].strip()
@@ -736,7 +803,7 @@ async def recent_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    text = "📋 *آخر العمليات*\n\n"
+    text = "📋 *آخر العمليات* (لحذف عملية اكتب: `حذف رقم_العملية`)\n\n"
 
     for row in rows:
         emoji = "💸" if row["type"] == "expense" else "💰"
@@ -1119,7 +1186,7 @@ async def callback_handler(
             )
             return
 
-        text = "📋 *آخر العمليات*\n\n"
+        text = "📋 *آخر العمليات* (يمكنك الحذف بكتابة: `حذف رقم_العملية`)\n\n"
 
         for row in rows:
             emoji = (
@@ -1219,6 +1286,8 @@ async def callback_handler(
 
 💰 `دخل 15000 راتب`
 
+❌ `حذف رقم_العملية` (مثال: حذف 3)
+
 🔎 `بحث بنزين`
 
 ⚙️ `ميزانية 10000`
@@ -1277,6 +1346,19 @@ async def callback_handler(
         await query.message.reply_text(
             "✅ تم تسجيل طريقة الدفع: 💳 بطاقة"
         )
+
+    elif data.startswith("delete_"):
+        transaction_id = data.split("_")[1]
+        success = delete_transaction_by_id(transaction_id, user_id)
+        if success:
+            await query.message.edit_text(
+                f"🗑 تم حذف العملية رقم `{transaction_id}` بنجاح.",
+                parse_mode="Markdown"
+            )
+        else:
+            await query.message.reply_text(
+                "❌ عذراً، لم يتم العثور على العملية أو تم حذفها مسبقاً."
+            )
 
 
 # =========================================================
