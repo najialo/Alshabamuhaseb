@@ -684,13 +684,18 @@ async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 *{format_money(balance)} TL*
 """
 
-    if usd:
-        text += f"\n🇺🇸 بالدولار: *${balance * usd:,.2f}*"
+    if usd and usd > 0:
+        usd_rate = 1 / usd
+        balance_usd = balance / usd_rate
+        text += f"\n🇺🇸 بالدولار: *${balance_usd:,.2f}*"
 
-    if eur:
-        text += f"\n🇪🇺 باليورو: *€{balance * eur:,.2f}*"
+    if eur and eur > 0:
+        eur_rate = 1 / eur
+        balance_eur = balance / eur_rate
+        text += f"\n🇪🇺 باليورو: *€{balance_eur:,.2f}*"
 
-    await update.message.reply_text(
+    message_target = update.message if update.message else update.callback_query.message
+    await message_target.reply_text(
         text,
         parse_mode="Markdown"
     )
@@ -1083,23 +1088,7 @@ async def callback_handler(
     user_id = query.from_user.id
 
     if data == "report":
-        income, expense, balance = get_report(user_id)
-
-        await query.message.reply_text(
-            f"""
-📊 *التقرير*
-
-💰 الدخل:
-*{format_money(income)} TL*
-
-💸 المصروف:
-*{format_money(expense)} TL*
-
-💵 الرصيد:
-*{format_money(balance)} TL*
-""",
-            parse_mode="Markdown"
-        )
+        await report_command(update, context)
 
     elif data == "recent":
         conn = get_db()
